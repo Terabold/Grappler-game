@@ -1,0 +1,41 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+env/
+venv/
+ENV/
+
+# Distribution / packaging
+build/
+dist/
+wheels/
+*.egg-info/
+
+# Log files
+*.log
+pip-log.txt
+
+# Unit test / coverage reports
+.coverage
+.tox/
+.cache
+.pytest_cache/
+htmlcov/
+nosetests.xml
+coverage.xml
+
+# Specific settings and credentials
+# If your settings file contains sensitive info (like database passwords), ignore it.
+# A common pattern is to have a generic settings file in the repo and a local_settings.py 
+# (which IS ignored) for local overrides.
+settings.py
+local_settings.py
+.env 
+
+# IDE-specific files (e.g., PyCharm, VS Code)
+.idea/
+.vscode/
+*.sublime-workspace

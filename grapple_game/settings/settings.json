@@ -1,0 +1,25 @@
+{
+  "video": {
+    "resolution": [
+      1920,
+      1080
+    ],
+    "fullscreen": false,
+    "fps_cap": 0,
+    "vsync": true
+  },
+  "audio": {
+    "master": 0.8,
+    "sfx": 0.8,
+    "music": 0.5
+  },
+  "controls": {
+    "left": 97,
+    "right": 100,
+    "up": 119,
+    "down": 115,
+    "jump": 32,
+    "grapple": 1073742049,
+    "pause": 27
+  }
+}
