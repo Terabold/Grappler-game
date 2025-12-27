@@ -126,7 +126,7 @@ class Room:
         return self.bounds.collidepoint(x, y)
     
     def get_collisions(self, rect):
-        """Get tile collisions for a rect (in world coords)."""
+        """Get tile collisions for a rect (in world coords). Returns ALL non-empty tiles."""
         results = []
         
         # Convert world rect to local tile coordinates
@@ -143,7 +143,8 @@ class Room:
         for y in range(start_y, end_y):
             for x in range(start_x, end_x):
                 tile_type = self.tiles[y][x]
-                if tile_type in (TILE_SOLID, TILE_PLATFORM):
+                # Return ALL non-empty tiles (spikes, grapple, exit, solid, platform)
+                if tile_type != TILE_EMPTY:
                     tile_rect = pygame.Rect(
                         self.world_x + x * self.tile_size,
                         self.world_y + y * self.tile_size,

@@ -1,8 +1,8 @@
 {
   "video": {
     "resolution": [
-      1600,
-      900
+      1920,
+      1080
     ],
     "fullscreen": false,
     "fps_cap": 0,

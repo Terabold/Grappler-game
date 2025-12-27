@@ -173,11 +173,19 @@ class GrappleHook:
         self.hook_y += self.fire_dir_y * move
         self.fire_distance += move
         
-        # Check for hit
+        # Check for hit - grapple attaches to solid surfaces
         hook_rect = pygame.Rect(int(self.hook_x) - 3, int(self.hook_y) - 3, 6, 6)
         collisions = room_manager.get_collisions(hook_rect)
         
-        if collisions:
+        # Attach to solid and grapple tiles (not spikes, exits, or empty)
+        valid_hit = False
+        for tile in collisions:
+            # tile_type: 1=solid, 3=grapple, 5=platform - all can be grappled
+            if tile.tile_type in (1, 3, 5):
+                valid_hit = True
+                break
+        
+        if valid_hit:
             self.state = "attached"
             self.anchor_x = self.hook_x
             self.anchor_y = self.hook_y

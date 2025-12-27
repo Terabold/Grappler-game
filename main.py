@@ -8,6 +8,7 @@ from worldeditor import WorldEditor
 from game.camera import Camera
 from game.room import RoomManager
 from game.player import Player
+from game.enemy import EnemyManager
 
 
 class Game:
@@ -35,6 +36,7 @@ class Game:
         self.camera = None
         self.room_manager = None
         self.player = None
+        self.enemy_manager = None
         
         self.show_debug = True
     
@@ -91,6 +93,12 @@ class Game:
         # Get spawn from room manager
         spawn = self.room_manager.spawn
         self.player = Player(spawn[0], spawn[1])
+        
+        # Initialize enemies
+        self.enemy_manager = EnemyManager()
+        # Add some test enemies in the first room
+        self.enemy_manager.add_enemy(spawn[0] + 200, spawn[1] - 50)
+        self.enemy_manager.add_enemy(spawn[0] + 350, spawn[1] - 50)
         
         self.state = "playing"
     
@@ -192,12 +200,40 @@ class Game:
                     self.pause_menu = PauseMenu(self) # Reset pause menu state
                     return
                 elif event.key == pygame.K_r:
-                    if self.room_manager.chapter:
-                        spawn = self.room_manager.chapter.spawn
-                        self.player = Player(spawn[0], spawn[1])
+                    # Respawn
+                    self._respawn_player()
+                    return
         
+        # Check for death
+        if self.player.dead:
+            self._respawn_player()
+            return
+        
+        # Update player
         self.player.update(dt, self.room_manager, controls, self.camera)
         
+        # Update enemies
+        if self.enemy_manager:
+            self.enemy_manager.update(dt, self.room_manager, self.player)
+            
+            # Auto-aim when starting attack
+            if self.player.attacking and self.player.attack_timer < 0.05:
+                self.player.auto_aim_at_enemies(self.enemy_manager.enemies)
+            
+            # Check sword attack hits
+            attack_rect = self.player.get_attack_rect()
+            if attack_rect and not self.player.attack_hit:
+                direction = 1 if self.player.facing_right else -1
+                hits = self.enemy_manager.check_sword_hit(attack_rect, self.player.attack_damage, direction)
+                if hits > 0:
+                    self.player.attack_hit = True  # Prevent multi-hit
+        
+        # Check for exit
+        if self.player.on_exit:
+            # For now, just show a message (could trigger level complete)
+            pass
+        
+        # Room transition
         transition = self.room_manager.check_room_transition(self.player.rect)
         if transition and not self.camera.transitioning:
             room_id, direction = transition
@@ -207,19 +243,72 @@ class Game:
         cx, cy = self.player.center
         self.camera.follow(cx, cy, dt)
     
+    def _respawn_player(self):
+        """Respawn player at spawn point."""
+        spawn = self.room_manager.spawn
+        self.player = Player(spawn[0], spawn[1])
+        if self.enemy_manager:
+            self.enemy_manager.reset()
+    
     def draw_game(self):
         self.screen.fill((15, 15, 25))
         self.room_manager.draw(self.screen, self.camera)
+        
+        # Draw enemies
+        if self.enemy_manager:
+            self.enemy_manager.draw(self.screen, self.camera)
+        
         self.player.draw(self.screen, self.camera)
         
         # Aim indicator
         if self.player.grapple.state == "inactive":
             self._draw_aim_indicator()
         
+        # Draw HUD
+        self._draw_hud()
+        
         if self.show_debug:
             self._draw_debug()
         
         self._draw_controls()
+    
+    def _draw_hud(self):
+        """Draw health bar and other UI."""
+        # Health bar
+        bar_x = 20
+        bar_y = 20
+        bar_width = 150
+        bar_height = 16
+        
+        # Background
+        pygame.draw.rect(self.screen, (40, 40, 40), (bar_x - 2, bar_y - 2, bar_width + 4, bar_height + 4))
+        pygame.draw.rect(self.screen, (60, 20, 20), (bar_x, bar_y, bar_width, bar_height))
+        
+        # Health
+        health_ratio = self.player.health / self.player.max_health
+        health_width = int(bar_width * health_ratio)
+        health_color = (60, 200, 80) if health_ratio > 0.5 else (200, 180, 50) if health_ratio > 0.25 else (200, 60, 60)
+        pygame.draw.rect(self.screen, health_color, (bar_x, bar_y, health_width, bar_height))
+        
+        # Border
+        pygame.draw.rect(self.screen, (100, 100, 100), (bar_x - 2, bar_y - 2, bar_width + 4, bar_height + 4), 2)
+        
+        # Health text
+        font = pygame.font.Font(None, 20)
+        health_text = f"{self.player.health}/{self.player.max_health}"
+        text_surf = font.render(health_text, True, (255, 255, 255))
+        self.screen.blit(text_surf, (bar_x + bar_width + 8, bar_y))
+        
+        # Attack indicator (show when can attack)
+        if self.player.attack_cooldown <= 0 and not self.player.attacking:
+            pygame.draw.circle(self.screen, (200, 200, 255), (bar_x + bar_width + 60, bar_y + bar_height // 2), 6)
+        
+        # Exit indicator
+        if self.player.on_exit:
+            exit_font = pygame.font.Font(None, 36)
+            exit_text = exit_font.render("EXIT - Press E to continue", True, (100, 255, 100))
+            text_rect = exit_text.get_rect(center=(self.width // 2, 50))
+            self.screen.blit(exit_text, text_rect)
     
     def _draw_aim_indicator(self):
         """Draw subtle aim dots."""
