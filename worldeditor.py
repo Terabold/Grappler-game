@@ -381,21 +381,27 @@ class FileList:
 # ============================================================================
 
 class WorldEditor:
-    def __init__(self, rooms_dir="rooms"):
-        pygame.init()
-        
-        self.screen = pygame.display.set_mode((1400, 800), pygame.RESIZABLE)
-        pygame.display.set_caption("World Editor")
+    def __init__(self, game=None, rooms_dir="rooms"):
+        if game:
+            self.game = game
+            self.screen = game.screen
+            self.rooms_dir = os.path.join(os.path.dirname(__file__), "rooms")
+        else:
+            pygame.init()
+            self.game = None
+            self.screen = pygame.display.set_mode((1400, 800), pygame.RESIZABLE)
+            pygame.display.set_caption("World Editor")
+            self.rooms_dir = rooms_dir
+            
         self.clock = pygame.time.Clock()
         self.running = True
         
         self.font = pygame.font.Font(None, 18)
         self.font_large = pygame.font.Font(None, 26)
         
-        self.rooms_dir = rooms_dir
-        os.makedirs(rooms_dir, exist_ok=True)
+        os.makedirs(self.rooms_dir, exist_ok=True)
         
-        self.world = WorldData(rooms_dir)
+        self.world = WorldData(self.rooms_dir)
         
         # Camera
         self.camera_x = 300
@@ -410,9 +416,10 @@ class WorldEditor:
         self.selected_room = None
         self.dragging_room = False
         self.drag_offset = (0, 0)
+        self.room_to_edit = None
         
         # UI
-        self.panel_width = 220
+        self.panel_width = 240  # Increased from 220
         self.show_grid = True
         self.setup_ui()
         
@@ -425,29 +432,47 @@ class WorldEditor:
         self.cache_zoom = 0
         
         # Load existing world
-        world_path = os.path.join(rooms_dir, "world.json")
+        world_path = os.path.join(self.rooms_dir, "world.json")
         if os.path.exists(world_path):
             self.world.load(world_path)
             self.center_view()
     
     def setup_ui(self):
         x = 10
-        w = 200
+        w = 220  # Widen buttons slightly since panel is wider
         
-        self.file_list = FileList(x, 50, w, 260, self.rooms_dir)
+        # Increase Y position and height for file list to avoid overlap with top labels
+        self.file_list = FileList(x, 60, w, 280, self.rooms_dir)
         
-        y = 320
+        # Start buttons lower down
+        y = 360
+        btn_h = 28
+        spacing = 34
+        
+        # Split into two columns for top buttons
+        half_w = (w - 10) // 2
+        
         self.buttons = [
-            Button(x, y, 95, 26, "Add Room", self.add_room),
-            Button(x + 105, y, 95, 26, "Refresh", self.refresh_files),
-            Button(x, y + 32, 95, 26, "Set Start", self.set_start),
-            Button(x + 105, y + 32, 95, 26, "Remove", self.remove_room),
-            Button(x, y + 70, w, 26, "Reload All", self.reload_rooms),
-            Button(x, y + 102, w, 26, "Toggle Grid", self.toggle_grid),
-            Button(x, y + 144, w, 26, "Save World", self.save_world),
-            Button(x, y + 176, w, 26, "Load World", self.load_world),
-            Button(x, y + 218, w, 26, "Room Editor", self.open_room_editor),
+            Button(x, y, half_w, btn_h, "Add Room", self.add_room),
+            Button(x + half_w + 10, y, half_w, btn_h, "Refresh", self.refresh_files),
+            
+            Button(x, y + spacing, half_w, btn_h, "Set Start", self.set_start),
+            Button(x + half_w + 10, y + spacing, half_w, btn_h, "Remove", self.remove_room),
+            
+            Button(x, y + spacing*2 + 10, w, btn_h, "Reload All", self.reload_rooms),
+            Button(x, y + spacing*3 + 10, w, btn_h, "Toggle Grid", self.toggle_grid),
+            Button(x, y + spacing*4 + 10, w, btn_h, "Save World", self.save_world),
+            Button(x, y + spacing*5 + 10, w, btn_h, "Load World", self.load_world),
+            
+            # Button(x, y + spacing*6 + 10, w, btn_h, "Room Editor", self.open_room_editor), # Remove external call if integrated, or keep separate?
+            # Let's keep it but maybe it switches state if integrated? For now, standard behavior.
+            
+            # Back button at the bottom
+            Button(x, self.screen.get_height() - 40, w, 30, "Back to Menu", self.exit_editor)
         ]
+        
+    def exit_editor(self):
+        self.running = False
     
     def clear_cache(self):
         """Clear scaled surface cache."""
@@ -552,6 +577,8 @@ class WorldEditor:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
+                if self.game:
+                    self.game.running = False
                 return
             
             self.file_list.handle_event(event)
@@ -593,8 +620,19 @@ class WorldEditor:
                         self.clear_cache()
             
             elif event.type == pygame.MOUSEBUTTONUP:
-                if event.button == 1 and self.dragging_room:
-                    if self.selected_room:
+                if event.button == 1:
+                    # Double click to edit room
+                    if hasattr(self, '_last_click_time'):
+                        if pygame.time.get_ticks() - self._last_click_time < 400:
+                            # Check if clicked a room
+                            room = self.get_room_at(*event.pos)
+                            if room:
+                                self.room_to_edit = room.filename
+                                self.running = False # Exit run loop
+                                return
+                    self._last_click_time = pygame.time.get_ticks()
+
+                    if self.dragging_room and self.selected_room:
                         self.world.snap_room(self.selected_room)
                         self.world.modified = True
                     self.dragging_room = False
@@ -626,6 +664,8 @@ class WorldEditor:
                     self.save_world()
                 elif event.key == pygame.K_r and event.mod & pygame.KMOD_CTRL:
                     self.reload_rooms()
+                elif event.key == pygame.K_ESCAPE:
+                    self.exit_editor()
             
             elif event.type == pygame.VIDEORESIZE:
                 self.screen = pygame.display.set_mode((event.w, event.h), pygame.RESIZABLE)
@@ -826,7 +866,8 @@ class WorldEditor:
             self.update(dt)
             self.draw()
         
-        pygame.quit()
+        if not self.game:
+            pygame.quit()
 
 
 if __name__ == "__main__":

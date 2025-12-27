@@ -17,8 +17,10 @@ class MainMenu:
         
         self.buttons = [
             Button(w//2 - btn_w//2, h//2, btn_w, btn_h, "Play"),
-            Button(w//2 - btn_w//2, h//2 + 60, btn_w, btn_h, "Settings"),
-            Button(w//2 - btn_w//2, h//2 + 120, btn_w, btn_h, "Quit"),
+            Button(w//2 - btn_w//2, h//2 + 50, btn_w, btn_h, "Room Editor"),
+            Button(w//2 - btn_w//2, h//2 + 100, btn_w, btn_h, "World Editor"),
+            Button(w//2 - btn_w//2, h//2 + 150, btn_w, btn_h, "Settings"),
+            Button(w//2 - btn_w//2, h//2 + 200, btn_w, btn_h, "Quit"),
         ]
         self.buttons[self.selected_index].selected = True
     
@@ -47,9 +49,13 @@ class MainMenu:
                 if i == 0:
                     self.game.start_game()
                 elif i == 1:
+                    self.game.start_editor()
+                elif i == 2:
+                    self.game.start_world_editor()
+                elif i == 3:
                     self.in_settings = True
                     self.settings_menu = SettingsMenu(self.game)
-                elif i == 2:
+                elif i == 4:
                     self.game.running = False
     
     def draw(self, surface):

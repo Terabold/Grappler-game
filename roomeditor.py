@@ -525,12 +525,19 @@ class FileDialog:
 class RoomEditor:
     """Main room editor application."""
     
-    def __init__(self, rooms_dir="rooms"):
-        pygame.init()
-        
-        # Window
-        self.screen = pygame.display.set_mode((1280, 720), pygame.RESIZABLE)
-        pygame.display.set_caption("Room Editor")
+    def __init__(self, game=None, rooms_dir="rooms"):
+        if game:
+            self.game = game
+            self.screen = game.screen
+            # Ensure rooms directory is absolute or relative to main script
+            self.rooms_dir = os.path.join(os.path.dirname(__file__), "rooms")
+        else:
+            pygame.init()
+            self.game = None
+            self.screen = pygame.display.set_mode((1280, 720), pygame.RESIZABLE)
+            pygame.display.set_caption("Room Editor")
+            self.rooms_dir = rooms_dir
+            
         self.clock = pygame.time.Clock()
         self.running = True
         
@@ -539,8 +546,7 @@ class RoomEditor:
         self.font_large = pygame.font.Font(None, 28)
         
         # Room data
-        self.rooms_dir = rooms_dir
-        os.makedirs(rooms_dir, exist_ok=True)
+        os.makedirs(self.rooms_dir, exist_ok=True)
         self.room = RoomData()
         self.room.fill_borders()
         
@@ -580,46 +586,64 @@ class RoomEditor:
     
     def setup_ui(self):
         """Setup UI elements."""
+        # Tile buttons in a 3x2 grid for compactness
         self.tile_buttons = []
-        x = 20
-        y = 60
-        size = 36
-        spacing = 50
+        start_x = 15
+        start_y = 50
+        size = 32
+        spacing = 50  # Enough for label below
+        cols = 3
         
         for tile_type in range(6):
-            btn = TileButton(x, y + tile_type * spacing, size, tile_type)
+            col = tile_type % cols
+            row = tile_type // cols
+            x = start_x + col * spacing
+            y = start_y + row * (size + 25)  # Extra space for label
+            btn = TileButton(x, y, size, tile_type)
             if tile_type == self.current_tile:
                 btn.active = True
             self.tile_buttons.append(btn)
         
-        # Tool buttons
+        # Tool buttons in a row/compact vertical list
         self.tool_buttons = []
         tools = [("Paint", "paint"), ("Fill", "fill"), ("Line", "line"), 
                  ("Rect", "rect"), ("Spawn", "spawn")]
         
-        y = 380
+        y = 170
         for i, (name, tool) in enumerate(tools):
-            btn = Button(20, y + i * 32, 80, 26, name, toggle=True)
+            btn = Button(15, y + i * 28, 80, 24, name, toggle=True)
             btn.tool = tool
             if tool == self.tool:
                 btn.active = True
             self.tool_buttons.append(btn)
         
-        # Action buttons
-        y = 560
+        # Size inputs
+        y_size = 320
+        self.width_input = InputBox(15, y_size, 50, 22, str(self.room.width), "W")
+        self.height_input = InputBox(80, y_size, 50, 22, str(self.room.height), "H")
+        self.resize_btn = Button(140, y_size, 40, 22, "Set", self.apply_resize)
+        
+        # Action buttons - compact 2-column layout
+        y = 370
+        btn_w = 85
+        btn_h = 26
+        gap = 5
+        
         self.action_buttons = [
-            Button(20, y, 80, 26, "New", self.new_room),
-            Button(105, y, 80, 26, "Open", self.open_room),
-            Button(20, y + 32, 80, 26, "Save", self.save_room),
-            Button(105, y + 32, 80, 26, "Save As", self.save_room_as),
-            Button(20, y + 70, 80, 26, "Borders", self.room.fill_borders),
-            Button(105, y + 70, 80, 26, "Clear", self.clear_room),
+            Button(15, y, btn_w, btn_h, "New", self.new_room),
+            Button(15 + btn_w + gap, y, btn_w, btn_h, "Open", self.open_room),
+            Button(15, y + btn_h + gap, btn_w, btn_h, "Save", self.save_room),
+            Button(15 + btn_w + gap, y + btn_h + gap, btn_w, btn_h, "Save As", self.save_room_as),
+            Button(15, y + (btn_h + gap) * 2, btn_w, btn_h, "Borders", self.room.fill_borders),
+            Button(15 + btn_w + gap, y + (btn_h + gap) * 2, btn_w, btn_h, "Clear", self.clear_room),
         ]
         
-        # Size inputs
-        self.width_input = InputBox(20, 520, 60, 24, str(self.room.width), "Width")
-        self.height_input = InputBox(100, 520, 60, 24, str(self.room.height), "Height")
-        self.resize_btn = Button(165, 520, 25, 24, "OK", self.apply_resize)
+        # Back button at bottom
+        self.action_buttons.append(Button(15, self.screen.get_height() - 40, self.panel_width - 30, 30, "Back to Menu", self.exit_editor))
+        
+    def exit_editor(self):
+        """Exit the editor."""
+        self.running = False
     
     def show_message(self, text, duration=2.0):
         """Show a temporary message."""
@@ -830,6 +854,8 @@ class RoomEditor:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
+                if self.game:
+                    self.game.running = False
                 return
             
             # File dialog
@@ -973,6 +999,15 @@ class RoomEditor:
                     self.set_tool("rect")
                 elif event.key == pygame.K_p:
                     self.set_tool("spawn")
+                
+                # Escape key - cancel tool or exit
+                elif event.key == pygame.K_ESCAPE:
+                    if self.line_start:
+                        self.line_start = None
+                    elif self.file_dialog.active:
+                        self.file_dialog.close()
+                    else:
+                        self.exit_editor()
             
             elif event.type == pygame.VIDEORESIZE:
                 self.screen = pygame.display.set_mode((event.w, event.h), pygame.RESIZABLE)
@@ -996,8 +1031,8 @@ class RoomEditor:
                 btn.update(mouse_pos, mouse_clicked)
             
             self.resize_btn.update(mouse_pos, mouse_clicked)
-    
     def set_tool(self, tool):
+
         """Set current tool."""
         self.tool = tool
         for btn in self.tool_buttons:
@@ -1151,56 +1186,59 @@ class RoomEditor:
         title_surf = self.font_large.render(title, True, COLOR_TEXT)
         self.screen.blit(title_surf, (15, 15))
         
-        # Tile section
+        # Tile section label
         section_surf = self.font.render("TILES (0-5)", True, COLOR_TEXT_DIM)
-        self.screen.blit(section_surf, (20, 42))
+        self.screen.blit(section_surf, (15, 35))
         
         for btn in self.tile_buttons:
             btn.draw(self.screen, self.font)
         
-        # Tool section
+        # Tool section label
         section_surf = self.font.render("TOOLS", True, COLOR_TEXT_DIM)
-        self.screen.blit(section_surf, (20, 360))
+        self.screen.blit(section_surf, (15, 155))
         
         for btn in self.tool_buttons:
             btn.draw(self.screen, self.font)
         
-        # Size section
+        # Size section label
         section_surf = self.font.render("ROOM SIZE", True, COLOR_TEXT_DIM)
-        self.screen.blit(section_surf, (20, 490))
+        self.screen.blit(section_surf, (15, 300))
         
         self.width_input.draw(self.screen, self.font)
         self.height_input.draw(self.screen, self.font)
         self.resize_btn.draw(self.screen, self.font)
         
-        # File section
+        # File section label
+        section_surf = self.font.render("FILE", True, COLOR_TEXT_DIM)
+        self.screen.blit(section_surf, (15, 355))
+        
         for btn in self.action_buttons:
             btn.draw(self.screen, self.font)
         
-        # Info
-        info_y = self.screen.get_height() - 100
+        # Info at bottom
+        info_y = self.screen.get_height() - 120
         
         # Filename
         filename = os.path.basename(self.room.filename) if self.room.filename else "Untitled"
         if self.room.modified:
             filename += "*"
         file_surf = self.font.render(filename, True, COLOR_TEXT)
-        self.screen.blit(file_surf, (20, info_y))
+        self.screen.blit(file_surf, (15, info_y))
         
         # Zoom
         zoom_surf = self.font.render(f"Zoom: {self.zoom:.1f}x", True, COLOR_TEXT_DIM)
-        self.screen.blit(zoom_surf, (20, info_y + 20))
+        self.screen.blit(zoom_surf, (15, info_y + 18))
         
-        # Mouse tile
+        # Current tile/tool
+        tool_surf = self.font.render(f"Tool: {self.tool.capitalize()}", True, COLOR_TEXT_DIM)
+        self.screen.blit(tool_surf, (15, info_y + 36))
+        
+        # Mouse pos if on canvas
         mouse_pos = pygame.mouse.get_pos()
         if mouse_pos[0] > self.panel_width:
             tile_x, tile_y = self.screen_to_tile(*mouse_pos)
             pos_surf = self.font.render(f"Tile: {tile_x}, {tile_y}", True, COLOR_TEXT_DIM)
-            self.screen.blit(pos_surf, (20, info_y + 40))
-        
-        # Controls hint
-        hint_surf = self.font.render("Scroll=Zoom  RMB=Pan  Home=Center", True, COLOR_TEXT_DIM)
-        self.screen.blit(hint_surf, (20, info_y + 60))
+            self.screen.blit(pos_surf, (15, info_y + 54))
     
     def run(self):
         """Main loop."""
@@ -1213,7 +1251,9 @@ class RoomEditor:
             self.update(dt)
             self.draw()
         
-        pygame.quit()
+        # Only quit if running standalone
+        if not self.game:
+            pygame.quit()
 
 
 # ============================================================================

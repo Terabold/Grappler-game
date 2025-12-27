@@ -408,80 +408,102 @@ class Player:
     
     def _move_with_collision(self, dt, room_manager):
         """Move with collision resolution and one-way platform support."""
-        # Store previous Y for platform collision detection
+        # Previous bottom for One-Way platform check
         prev_bottom = self.y + self.height
         
-        # Move X - only collide with solid tiles (not platforms)
-        self.x += self.vx * dt
+        # Sub-stepping for collision accuracy (prevent tunneling)
+        # Calculate total move amount
+        dx = self.vx * dt
+        dy = self.vy * dt
         
-        rect = self.rect
-        for tile in room_manager.get_collisions(rect):
-            # Only solid tiles block horizontal movement
-            if tile.tile_type == TILE_SOLID:
-                if self.vx > 0:
-                    self.x = tile.rect.left - self.width
-                    self.vx = 0.0
-                elif self.vx < 0:
-                    self.x = tile.rect.right
-                    self.vx = 0.0
-                rect = self.rect
+        # Determine number of steps (max 8 pixels per step to be safe)
+        steps_x = max(1, int(abs(dx) / 10) + 1)
+        steps_y = max(1, int(abs(dy) / 10) + 1)
         
-        # Room bounds X - always enforce
-        if room_manager.current_room:
-            bounds = room_manager.current_room.bounds
-            if self.x < bounds.left:
-                if not self._has_adjacent_room(room_manager, "left"):
-                    self.x = bounds.left
-                    self.vx = 0.0
-            if self.x + self.width > bounds.right:
-                if not self._has_adjacent_room(room_manager, "right"):
-                    self.x = bounds.right - self.width
-                    self.vx = 0.0
+        step_dx = dx / steps_x
+        step_dy = dy / steps_y
         
-        # Move Y
-        self.y += self.vy * dt
-        
-        landed = False
-        rect = self.rect
-        
-        for tile in room_manager.get_collisions(rect):
-            if tile.tile_type == TILE_SOLID:
-                # Solid tiles block from all directions
-                if self.vy >= 0:
-                    self.y = tile.rect.top - self.height
-                    self.vy = 0.0
-                    landed = True
-                elif self.vy < 0:
-                    self.y = tile.rect.bottom
-                    self.vy = 0.0
-                rect = self.rect
+        # Move X in steps
+        for _ in range(steps_x):
+            self.x += step_dx
+            rect = self.rect
+            collision = False
             
-            elif tile.tile_type == TILE_PLATFORM:
-                # One-way platforms: only collide when falling through from above
-                # Conditions:
-                # 1. Moving downward (vy >= 0)
-                # 2. Player's previous bottom was above or at platform top
-                # 3. Not holding down to drop through
-                if (self.vy >= 0 and 
-                    prev_bottom <= tile.rect.top + 4 and 
-                    not self.drop_through_platforms):
-                    self.y = tile.rect.top - self.height
-                    self.vy = 0.0
-                    landed = True
-                    rect = self.rect
+            # Check for wall collision
+            for tile in room_manager.get_collisions(rect):
+                if tile.tile_type == TILE_SOLID:
+                    if step_dx > 0:
+                        self.x = tile.rect.left - self.width
+                        self.vx = 0.0
+                    elif step_dx < 0:
+                        self.x = tile.rect.right
+                        self.vx = 0.0
+                    collision = True
+                    break # Stop processing this step if collided
+            
+            # Check room bounds X if no tile collision happened (or even if it did, to be safe)
+            if room_manager.current_room:
+                bounds = room_manager.current_room.bounds
+                if self.x < bounds.left:
+                    if not self._has_adjacent_room(room_manager, "left"):
+                        self.x = bounds.left
+                        self.vx = 0.0
+                elif self.x + self.width > bounds.right:
+                    if not self._has_adjacent_room(room_manager, "right"):
+                        self.x = bounds.right - self.width
+                        self.vx = 0.0
+            
+            if collision:
+                break
         
-        # Room bounds Y - always enforce
-        if room_manager.current_room:
-            bounds = room_manager.current_room.bounds
-            if self.y < bounds.top:
-                if not self._has_adjacent_room(room_manager, "up"):
-                    self.y = bounds.top
-                    self.vy = 0.0
-            if self.y + self.height > bounds.bottom:
-                if not self._has_adjacent_room(room_manager, "down"):
-                    self.y = bounds.bottom - self.height
-                    self.vy = 0.0
-                    landed = True
+        # Move Y in steps
+        landed = False
+        for _ in range(steps_y):
+            self.y += step_dy
+            rect = self.rect
+            collision = False
+            
+            # Check collisions
+            for tile in room_manager.get_collisions(rect):
+                if tile.tile_type == TILE_SOLID:
+                    if step_dy >= 0:
+                        self.y = tile.rect.top - self.height
+                        self.vy = 0.0
+                        landed = True
+                    elif step_dy < 0:
+                        self.y = tile.rect.bottom
+                        self.vy = 0.0
+                    collision = True
+                    
+                elif tile.tile_type == TILE_PLATFORM:
+                    if (step_dy >= 0 and 
+                        prev_bottom <= tile.rect.top + 4 and 
+                        not self.drop_through_platforms):
+                        # Ensure we are actually colliding with the top part
+                        if self.y + self.height >= tile.rect.top and self.y + self.height <= tile.rect.top + 10:
+                            self.y = tile.rect.top - self.height
+                            self.vy = 0.0
+                            landed = True
+                            collision = True
+                
+                if collision:
+                    break
+            
+            # Check room bounds Y
+            if room_manager.current_room:
+                bounds = room_manager.current_room.bounds
+                if self.y < bounds.top:
+                    if not self._has_adjacent_room(room_manager, "up"):
+                        self.y = bounds.top
+                        self.vy = 0.0
+                elif self.y + self.height > bounds.bottom:
+                    if not self._has_adjacent_room(room_manager, "down"):
+                        self.y = bounds.bottom - self.height
+                        self.vy = 0.0
+                        landed = True
+            
+            if collision:
+                break
         
         # Ground check
         if landed:

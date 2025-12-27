@@ -2,6 +2,9 @@ import pygame
 import os
 from settings.settings_manager import SettingsManager
 from menus.main_menu import MainMenu
+from menus.pause_menu import PauseMenu
+from roomeditor import RoomEditor
+from worldeditor import WorldEditor
 from game.camera import Camera
 from game.room import RoomManager
 from game.player import Player
@@ -23,7 +26,11 @@ class Game:
         self.running = True
         
         self.state = "main_menu"
+        self.state = "main_menu"
         self.main_menu = MainMenu(self)
+        self.pause_menu = PauseMenu(self)
+        self.editor = None
+        self.world_editor = None
         
         self.camera = None
         self.room_manager = None
@@ -51,6 +58,27 @@ class Game:
         self._init_display()
         pygame.display.set_caption("Grapple")
         self.main_menu = MainMenu(self)
+        self.pause_menu = PauseMenu(self)
+
+    def create_main_menu(self):
+        return MainMenu(self)
+
+    def start_editor(self, filename=None):
+        self.editor = RoomEditor(self)
+        if filename:
+            self.editor.room.load(filename)
+            self.editor.width_input.set_value(self.editor.room.width)
+            self.editor.height_input.set_value(self.editor.room.height)
+            self.editor.center_view()
+            self.editor.from_world_editor = True # Flag to know where to return
+        else:
+            self.editor.from_world_editor = False
+            
+        self.state = "editor"
+
+    def start_world_editor(self):
+        self.world_editor = WorldEditor(self)
+        self.state = "world_editor"
     
     def start_game(self):
         self.camera = Camera(self.width, self.height)
@@ -84,6 +112,71 @@ class Game:
             elif self.state == "playing":
                 self.update_game(events, dt)
                 self.draw_game()
+            elif self.state == "paused":
+                self.pause_menu.update(events, dt)
+                self.draw_game() # Draw game behind pause menu
+                self.pause_menu.draw(self.screen)
+            elif self.state == "editor":
+                # Editor has its own loop structure, but we refactored it to use update/draw
+                # But roomeditor.py handles its own loop in 'run'. 
+                # Since we want to integrate it, we should use its update/draw methods if possible
+                # The refactoring I did kept 'run' but added 'update' and 'draw'. 
+                # However, 'run' has the loop. 
+                # Let's change this: We will just call editor.run() once and let it block?
+                # No, that blocks the main loop here. 
+                # My refactor of RoomEditor added handle_events, update, draw. 
+                # So we can just call those.
+                
+                # We need to manually pass events to editor because it gets them internally in handle_events
+                # But since we already got events here... 
+                # RoomEditor.handle_events calls pygame.event.get() which will be empty if we call it again.
+                # I should have modified RoomEditor to accept events. 
+                # Wait, I didn't modify handle_events to accept events. It calls pygame.event.get().
+                # This is a conflict. 
+                # I should just let the editor RUN its own loop until it exits.
+                
+                if self.editor.running:
+                    self.editor.run()
+                    # When run() returns, it means editor exited
+                    # When run() returns, it means editor exited
+                    if hasattr(self.editor, 'from_world_editor') and self.editor.from_world_editor:
+                        self.editor = None
+                        self.start_world_editor()
+                    else:
+                        self.state = "main_menu"
+                        self.editor = None
+                        # Re-init display if needed or ensure menu is ready
+                        self.main_menu = MainMenu(self)
+                else:
+                    self.state = "main_menu"
+            elif self.state == "world_editor":
+                if self.world_editor.running:
+                    self.world_editor.run() # Assuming WorldEditor also has a run() method that loops
+                    # Wait, WorldEditor has a loop in run(), but if we want it integrated, we should probably
+                    # use update/draw like we tried with RoomEditor but failed due to dependencies.
+                    # Since RoomEditor works by calling .run() (which has its own loop), let's do the same for WorldEditor.
+                    # WorldEditor's run() method should be compatible.
+                    
+                    if self.world_editor.room_to_edit:
+                         # Transition to room editor
+                        room_file = self.world_editor.room_to_edit
+                        self.world_editor = None # Clean up world editor? Or keep it?
+                        # It's better to keep it if we want to preserve state (camera, selection)
+                        # But self.world_editor is currently re-created in start_world_editor?
+                        # start_world_editor re-creates it. 
+                        # To preserve state, we should probably not destroy it, or save state.
+                        # For now, let's just pass the file and when returning, we restart world editor.
+                        # The user asked for "easly menuvering".
+                        
+                        self.start_editor(room_file)
+                        # Mark that we came from world editor so we can go back
+                        self.editor.from_world_editor = True
+                    else:
+                        self.state = "main_menu"
+                        self.world_editor = None
+                        self.main_menu = MainMenu(self)
+                else:
+                    self.state = "main_menu"
             
             pygame.display.flip()
         
@@ -94,8 +187,9 @@ class Game:
         
         for event in events:
             if event.type == pygame.KEYDOWN:
-                if event.key == controls["pause"]:
-                    self.state = "main_menu"
+                if event.key == controls["pause"] or event.key == pygame.K_ESCAPE:
+                    self.state = "paused"
+                    self.pause_menu = PauseMenu(self) # Reset pause menu state
                     return
                 elif event.key == pygame.K_r:
                     if self.room_manager.chapter:

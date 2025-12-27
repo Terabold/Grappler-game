@@ -277,13 +277,13 @@ class RoomManager:
         self.load_world(chapter_file)
     
     def get_collisions(self, rect):
-        """Get collisions from current room."""
+        """Get collisions from current room only."""
         if self.current_room:
             return self.current_room.get_collisions(rect)
         return []
     
     def get_solid_collisions(self, rect):
-        """Get solid collisions from current room."""
+        """Get solid collisions from current room only."""
         if self.current_room:
             return self.current_room.get_solid_collisions(rect)
         return []
