@@ -1,15 +1,17 @@
 {
-    "start": "room_01",
-    "rooms": [
-        {
-            "id": "room_01",
-            "x": 0,
-            "y": 0
-        },
-        {
-            "id": "room_02",
-            "x": 640,
-            "y": 0
-        }
-    ]
+  "start": "room_01",
+  "rooms": [
+    {
+      "id": "room_01",
+      "file": "room_01.json",
+      "x": -448,
+      "y": 96
+    },
+    {
+      "id": "room_02",
+      "file": "room_02.json",
+      "x": 352,
+      "y": 128
+    }
+  ]
 }

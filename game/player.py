@@ -1,293 +1,520 @@
 import pygame
-import math
 from .physics import (
-    GrappleHook, apply_gravity, GRAVITY, TERMINAL_VELOCITY,
-    JUMP_VELOCITY, COYOTE_TIME, JUMP_BUFFER_TIME
+    GrappleHook, apply_gravity, approach, sign, check_wall, check_ground,
+    GRAVITY, TERMINAL_VELOCITY, JUMP_VELOCITY,
+    WALL_SLIDE_SPEED, WALL_JUMP_VELOCITY_X, WALL_JUMP_VELOCITY_Y,
+    COYOTE_TIME, JUMP_BUFFER_TIME,
+    ROLL_SPEED, ROLL_DURATION, ROLL_COOLDOWN, ROLL_IFRAMES,
+    SPRINT_MULTIPLIER
 )
+from .room import TILE_SOLID, TILE_PLATFORM
 
 
 class Player:
+    """
+    Player controller with:
+    - Basic movement + sprint
+    - Jump with coyote time and buffer
+    - Wall slide and wall jump
+    - Roll/dash with i-frames
+    - Pull-based grappling hook
+    - One-way platform support
+    """
+    
     def __init__(self, x, y):
-        self.x = x
-        self.y = y
-        self.width = 28
-        self.height = 28
+        self.x = float(x)
+        self.y = float(y)
+        self.width = 24
+        self.height = 24
         
-        # Velocity
-        self.vx = 0
-        self.vy = 0
+        self.vx = 0.0
+        self.vy = 0.0
         
-        # Movement parameters
-        self.speed = 280  # Horizontal movement speed
-        self.air_control = 0.7  # Reduced control in air
-        self.friction = 0.85  # Ground friction when not moving
-        self.air_friction = 0.95  # Air friction
+        # Movement tuning
+        self.speed = 260
+        self.accel = 1600
+        self.decel = 1400
+        self.air_accel = 1200
+        self.air_decel = 600
         
-        # Jump parameters
-        self.jump_velocity = JUMP_VELOCITY
+        # Ground/jump state
         self.on_ground = False
-        self.coyote_timer = 0
-        self.jump_buffer_timer = 0
-        self.jump_held = False  # For variable jump height
-        self.jump_cut_multiplier = 0.5  # Velocity multiplier when releasing jump early
+        self.coyote_timer = 0.0
+        self.jump_buffer_timer = 0.0
+        self.jump_held = False
+        self.jump_released_midair = False
+        
+        # Platform drop-through (hold down to fall through platforms)
+        self.drop_through_platforms = False
+        self.last_y = 0.0  # Track last Y for platform collision
+        
+        # Wall state
+        self.wall_dir = 0
+        self.wall_jump_locked = False
+        self.wall_jump_lock_timer = 0.0
+        
+        # Sprint state
+        self.sprinting = False
+        
+        # Roll/dash state
+        self.rolling = False
+        self.roll_timer = 0.0
+        self.roll_cooldown = 0.0
+        self.roll_dir = 1  # 1 = right, -1 = left
+        self.roll_was_pressed = False
         
         # Grapple
         self.grapple = GrappleHook()
+        self.grapple_was_pressed = False
         
         # Visual
-        self.color = (100, 200, 100)
-        self.grapple_color = (100, 150, 200)
+        self.facing_right = True
         
         # State
         self.frozen = False
-        self.facing_right = True
-        
-        # Transition slide
-        self.transition_slide = 20
         self.transition_dir = (0, 0)
-        self.transition_slid = 0
+        self.transition_slid = 0.0
+        self.transition_slide = 24
+        
+        # Combat
+        self.health = 100
+        self.max_health = 100
+        self.invincible_timer = 0.0
     
     @property
     def rect(self):
-        return pygame.Rect(self.x, self.y, self.width, self.height)
+        return pygame.Rect(int(self.x), int(self.y), self.width, self.height)
     
     @property
     def center(self):
         return (self.x + self.width / 2, self.y + self.height / 2)
     
+    @property
+    def is_invincible(self):
+        """True if player can't be hurt (rolling or i-frames)"""
+        return self.invincible_timer > 0 or (self.rolling and self.roll_timer < ROLL_IFRAMES)
+    
+    # =========================================================================
+    # TRANSITIONS
+    # =========================================================================
+    
     def start_transition(self, direction):
-        """Called when room transition starts"""
         self.frozen = True
-        self.transition_slid = 0
-        self.grapple.release()  # Release grapple on room transition
+        self.transition_slid = 0.0
+        self.grapple.cancel()
+        self.vx = 0.0
+        self.vy = 0.0
+        self.rolling = False
         
-        if direction == "right":
-            self.transition_dir = (1, 0)
-        elif direction == "left":
-            self.transition_dir = (-1, 0)
-        elif direction == "down":
-            self.transition_dir = (0, 1)
-        elif direction == "up":
-            self.transition_dir = (0, -1)
-        else:
-            self.transition_dir = (0, 0)
+        dirs = {"right": (1, 0), "left": (-1, 0), "down": (0, 1), "up": (0, -1)}
+        self.transition_dir = dirs.get(direction, (0, 0))
     
     def end_transition(self):
-        """Called when room transition ends"""
         self.frozen = False
         self.transition_dir = (0, 0)
     
-    def update(self, dt, room_manager, controls):
+    # =========================================================================
+    # UPDATE
+    # =========================================================================
+    
+    def update(self, dt, room_manager, controls, camera=None):
         if self.frozen:
-            self._update_transition(dt)
+            if self.transition_slid < self.transition_slide:
+                move = 150 * dt
+                self.x += self.transition_dir[0] * move
+                self.y += self.transition_dir[1] * move
+                self.transition_slid += move
             return
         
+        dt = min(dt, 0.033)
+        
         keys = pygame.key.get_pressed()
-        mouse_buttons = pygame.mouse.get_pressed()
+        mouse = pygame.mouse.get_pressed()
         mouse_pos = pygame.mouse.get_pos()
         
-        # Update grapple
-        self.grapple.update(dt, self, room_manager)
+        if camera:
+            world_mouse = camera.screen_to_world(mouse_pos)
+        else:
+            world_mouse = mouse_pos
         
-        if self.grapple.state == "attached":
-            # While grappling, handle rope controls
+        # Update timers
+        self.invincible_timer = max(0.0, self.invincible_timer - dt)
+        self.wall_jump_lock_timer = max(0.0, self.wall_jump_lock_timer - dt)
+        self.roll_cooldown = max(0.0, self.roll_cooldown - dt)
+        
+        if self.wall_jump_lock_timer <= 0:
+            self.wall_jump_locked = False
+        
+        # Grapple input
+        grapple_key = controls.get("grapple", pygame.K_LSHIFT)
+        grapple_pressed = keys[grapple_key] if isinstance(grapple_key, int) else False
+        if mouse[2]:
+            grapple_pressed = True
+        
+        # Roll input (left ctrl or left mouse)
+        roll_pressed = keys[pygame.K_LCTRL] or mouse[0]
+        
+        # Sprint input (hold shift when not using it for grapple)
+        # Sprint is active when holding shift AND not grappling
+        self.sprinting = keys[pygame.K_LSHIFT] and self.grapple.state == "inactive"
+        
+        # Handle grapple
+        self._handle_grapple(dt, grapple_pressed, world_mouse, keys, controls, room_manager)
+        
+        # If rolling, continue roll
+        if self.rolling:
+            self._update_roll(dt, room_manager)
+        # If attached to grapple, grapple controls movement
+        elif self.grapple.state == "attached":
             self._update_grappling(dt, keys, controls, room_manager)
         else:
-            # Normal movement
-            self._update_normal(dt, keys, controls, room_manager)
+            # Check for roll initiation
+            if roll_pressed and not self.roll_was_pressed and self.roll_cooldown <= 0:
+                self._start_roll(keys, controls)
+            else:
+                self._update_normal(dt, keys, controls, room_manager)
         
-        # Handle grapple input (fire/release)
-        self._handle_grapple_input(keys, mouse_buttons, mouse_pos, controls, room_manager)
+        self.grapple_was_pressed = grapple_pressed
+        self.roll_was_pressed = roll_pressed
     
-    def _update_transition(self, dt):
-        """Slide into new room during transition"""
-        if self.transition_slid < self.transition_slide:
-            slide_speed = 150
-            move = slide_speed * dt
-            self.x += self.transition_dir[0] * move
-            self.y += self.transition_dir[1] * move
-            self.transition_slid += move
+    # =========================================================================
+    # ROLL/DASH
+    # =========================================================================
     
-    def _update_normal(self, dt, keys, controls, room_manager):
-        """Normal physics-based movement"""
-        # Horizontal input
-        move_input = 0
+    def _start_roll(self, keys, controls):
+        """Initiate a roll/dash - only on ground."""
+        # Can only roll on ground
+        if not self.on_ground:
+            return
+        
+        self.rolling = True
+        self.roll_timer = 0.0
+        self.roll_cooldown = ROLL_COOLDOWN
+        
+        # Roll in input direction, or facing direction if no input
         if keys[controls["left"]]:
-            move_input = -1
+            self.roll_dir = -1
             self.facing_right = False
-        if keys[controls["right"]]:
-            move_input = 1
+        elif keys[controls["right"]]:
+            self.roll_dir = 1
             self.facing_right = True
-        
-        # Apply horizontal movement
-        if self.on_ground:
-            if move_input != 0:
-                self.vx = move_input * self.speed
-            else:
-                self.vx *= self.friction
         else:
-            # Air control (less responsive)
-            if move_input != 0:
-                target_vx = move_input * self.speed
-                self.vx += (target_vx - self.vx) * self.air_control * dt * 10
-            else:
-                self.vx *= self.air_friction
+            self.roll_dir = 1 if self.facing_right else -1
         
-        # Clamp tiny velocities to zero
-        if abs(self.vx) < 1:
-            self.vx = 0
+        # Set roll velocity
+        self.vx = self.roll_dir * ROLL_SPEED
         
-        # Apply gravity
-        self.vy = apply_gravity(self.vy, dt)
+        # Small upward boost to make it feel snappy
+        self.vy = -80
+    
+    def _update_roll(self, dt, room_manager):
+        """Update during roll."""
+        self.roll_timer += dt
         
-        # Update coyote time
-        if self.on_ground:
-            self.coyote_timer = COYOTE_TIME
-        else:
-            self.coyote_timer = max(0, self.coyote_timer - dt)
+        if self.roll_timer >= ROLL_DURATION:
+            # End roll
+            self.rolling = False
+            # Preserve some momentum
+            self.vx *= 0.6
+            return
         
-        # Update jump buffer
-        self.jump_buffer_timer = max(0, self.jump_buffer_timer - dt)
+        # Maintain roll speed (no deceleration during roll)
+        self.vx = self.roll_dir * ROLL_SPEED
         
-        # Jump input
-        if keys[controls["jump"]]:
-            if not self.jump_held:
-                # Fresh press
-                self.jump_held = True
-                if self._can_jump():
-                    self._do_jump()
-                else:
-                    # Buffer the jump
-                    self.jump_buffer_timer = JUMP_BUFFER_TIME
-        else:
-            # Jump released - cut velocity for variable height
-            if self.jump_held and self.vy < 0:
-                self.vy *= self.jump_cut_multiplier
-            self.jump_held = False
+        # Reduced gravity during roll
+        self.vy = apply_gravity(self.vy, dt * 0.4)
         
-        # Check buffered jump when landing
-        if self.on_ground and self.jump_buffer_timer > 0:
-            self._do_jump()
-            self.jump_buffer_timer = 0
+        # Clear wall state during roll
+        self.wall_dir = 0
         
         # Move with collision
         self._move_with_collision(dt, room_manager)
     
-    def _update_grappling(self, dt, keys, controls, room_manager):
-        """Update while attached to grapple"""
-        # Rope length control
-        if keys[controls["up"]]:
-            self.grapple.shorten_rope(200 * dt)
-        if keys[controls["down"]]:
-            self.grapple.lengthen_rope(200 * dt)
-        
-        # Swing input - add angular momentum
-        if keys[controls["left"]]:
-            self.grapple.angular_velocity -= 3 * dt
-        if keys[controls["right"]]:
-            self.grapple.angular_velocity += 3 * dt
+    # =========================================================================
+    # GRAPPLE
+    # =========================================================================
     
-    def _handle_grapple_input(self, keys, mouse_buttons, mouse_pos, controls, room_manager):
-        """Handle grapple fire/release input"""
-        grapple_key = controls.get("grapple", pygame.K_LSHIFT)
-        
-        # Can use either grapple key or right mouse button
-        grapple_pressed = keys[grapple_key] if isinstance(grapple_key, int) else False
-        
-        if grapple_pressed or mouse_buttons[2]:  # Right click
-            if self.grapple.state == "inactive":
-                # Fire grapple towards mouse
-                # Need to convert screen mouse pos to world pos
-                # For now, fire in facing direction at 45 degrees up
+    def _handle_grapple(self, dt, grapple_pressed, world_mouse, keys, controls, room_manager):
+        """Handle grapple input."""
+        # Fire only on fresh press
+        if grapple_pressed and not self.grapple_was_pressed:
+            if self.grapple.state == "inactive" and not self.rolling:
                 cx, cy = self.center
-                if mouse_buttons[2]:
-                    # TODO: Convert mouse_pos through camera
-                    # For now, estimate based on facing direction
-                    target_x = cx + (200 if self.facing_right else -200)
-                    target_y = cy - 150
-                else:
-                    target_x = cx + (200 if self.facing_right else -200)
-                    target_y = cy - 150
-                
-                self.grapple.fire(cx, cy, target_x, target_y)
-        else:
-            # Released grapple key
+                self.grapple.fire(cx, cy, world_mouse[0], world_mouse[1])
+        
+        # Release on button release
+        if not grapple_pressed and self.grapple_was_pressed:
             if self.grapple.state == "attached":
-                # Get velocity boost from swing
-                boost_vx, boost_vy = self.grapple.get_release_velocity()
+                boost_vx, boost_vy = self.grapple.release()
                 self.vx = boost_vx
                 self.vy = boost_vy
-                self.grapple.release()
+            elif self.grapple.state == "firing":
+                self.grapple.cancel()
+        
+        # Update firing grapple
+        if self.grapple.state == "firing":
+            self.grapple.update(dt, self, room_manager)
     
-    def fire_grapple_at(self, target_x, target_y):
-        """Fire grapple at specific world position (called from game with camera conversion)"""
-        if self.grapple.state == "inactive":
-            cx, cy = self.center
-            self.grapple.fire(cx, cy, target_x, target_y)
+    def _update_grappling(self, dt, keys, controls, room_manager):
+        """Update while grappling."""
+        if keys[controls.get("down", pygame.K_s)]:
+            self.grapple.set_mode("swing")
+        else:
+            self.grapple.set_mode("pull")
+        
+        self.grapple.update(dt, self, room_manager)
+        
+        if self.grapple.mode == "swing":
+            if keys[controls["left"]]:
+                self.grapple.add_swing_force(-1, dt)
+            if keys[controls["right"]]:
+                self.grapple.add_swing_force(1, dt)
+            if keys[controls["up"]]:
+                self.grapple.shorten_rope(200 * dt)
+            if keys[controls["down"]]:
+                self.grapple.lengthen_rope(200 * dt)
+        
+        self.on_ground = False
+        self.wall_dir = 0
+        self._move_with_collision(dt, room_manager)
+    
+    # =========================================================================
+    # NORMAL MOVEMENT
+    # =========================================================================
+    
+    def _update_normal(self, dt, keys, controls, room_manager):
+        """Normal movement update."""
+        # Get horizontal input
+        move_input = 0
+        if keys[controls["left"]]:
+            move_input -= 1
+        if keys[controls["right"]]:
+            move_input += 1
+        
+        if move_input != 0:
+            self.facing_right = move_input > 0
+        
+        # Drop through platforms when holding down
+        self.drop_through_platforms = keys[controls.get("down", pygame.K_s)]
+        
+        # Apply horizontal movement (with sprint)
+        self._apply_horizontal_movement(move_input, dt)
+        
+        # Check walls (only when airborne and not locked)
+        self.wall_dir = 0
+        if not self.on_ground and not self.wall_jump_locked:
+            if check_wall(self.rect, "left", room_manager):
+                self.wall_dir = -1
+            elif check_wall(self.rect, "right", room_manager):
+                self.wall_dir = 1
+        
+        # Apply gravity (with wall slide)
+        if self.wall_dir != 0 and self.vy > 0:
+            self.vy = min(self.vy + GRAVITY * 0.1 * dt, WALL_SLIDE_SPEED)
+        else:
+            self.vy = apply_gravity(self.vy, dt)
+        
+        # Update timers
+        if self.on_ground:
+            self.coyote_timer = COYOTE_TIME
+            self.jump_released_midair = False
+            self.wall_jump_locked = False
+        else:
+            self.coyote_timer = max(0.0, self.coyote_timer - dt)
+        
+        self.jump_buffer_timer = max(0.0, self.jump_buffer_timer - dt)
+        
+        # Handle jump
+        self._handle_jump(keys, controls)
+        
+        # Move with collision
+        self._move_with_collision(dt, room_manager)
+    
+    def _apply_horizontal_movement(self, move_input, dt):
+        """Apply horizontal acceleration/deceleration with sprint."""
+        # Calculate target speed (with sprint)
+        current_speed = self.speed
+        if self.sprinting and self.on_ground:
+            current_speed *= SPRINT_MULTIPLIER
+        
+        target_vx = move_input * current_speed
+        
+        if self.on_ground:
+            if move_input != 0:
+                self.vx = approach(self.vx, target_vx, self.accel * dt)
+            else:
+                self.vx = approach(self.vx, 0, self.decel * dt)
+        else:
+            if move_input != 0:
+                self.vx = approach(self.vx, target_vx, self.air_accel * dt)
+            else:
+                self.vx = approach(self.vx, 0, self.air_decel * dt)
+        
+        if abs(self.vx) < 0.5:
+            self.vx = 0.0
+    
+    def _handle_jump(self, keys, controls):
+        """Handle jump input."""
+        jump_pressed = keys[controls["jump"]]
+        
+        if jump_pressed:
+            if not self.jump_held:
+                self.jump_held = True
+                self.jump_released_midair = False
+                
+                if self._can_jump():
+                    self._do_jump()
+                elif self.wall_dir != 0:
+                    self._do_wall_jump()
+                else:
+                    self.jump_buffer_timer = JUMP_BUFFER_TIME
+        else:
+            if self.jump_held:
+                if self.vy < 0 and not self.jump_released_midair:
+                    self.vy *= 0.5
+                    self.jump_released_midair = True
+            self.jump_held = False
+        
+        # Buffered jump
+        if self.jump_buffer_timer > 0:
+            if self.on_ground:
+                self._do_jump()
+                self.jump_buffer_timer = 0.0
+            elif self.wall_dir != 0:
+                self._do_wall_jump()
+                self.jump_buffer_timer = 0.0
     
     def _can_jump(self):
-        """Check if player can jump"""
         return self.on_ground or self.coyote_timer > 0
     
     def _do_jump(self):
-        """Execute a jump"""
-        self.vy = self.jump_velocity
+        self.vy = JUMP_VELOCITY
         self.on_ground = False
-        self.coyote_timer = 0
+        self.coyote_timer = 0.0
+    
+    def _do_wall_jump(self):
+        self.vx = -self.wall_dir * WALL_JUMP_VELOCITY_X
+        self.vy = WALL_JUMP_VELOCITY_Y
+        self.on_ground = False
+        self.coyote_timer = 0.0
+        self.facing_right = self.vx > 0
+        self.wall_jump_locked = True
+        self.wall_jump_lock_timer = 0.2
+        self.wall_dir = 0
+    
+    # =========================================================================
+    # COLLISION
+    # =========================================================================
     
     def _move_with_collision(self, dt, room_manager):
-        """Move with collision detection and resolution"""
-        # Store if we were on ground
-        was_on_ground = self.on_ground
-        self.on_ground = False
+        """Move with collision resolution and one-way platform support."""
+        # Store previous Y for platform collision detection
+        prev_bottom = self.y + self.height
         
-        # Move X
+        # Move X - only collide with solid tiles (not platforms)
         self.x += self.vx * dt
-        for col in room_manager.get_collisions(self.rect):
-            if self.vx > 0:
-                self.x = col.left - self.width
-            elif self.vx < 0:
-                self.x = col.right
-            self.vx = 0
         
-        # Room edge collision X - only clamp if no adjacent room
+        rect = self.rect
+        for tile in room_manager.get_collisions(rect):
+            # Only solid tiles block horizontal movement
+            if tile.tile_type == TILE_SOLID:
+                if self.vx > 0:
+                    self.x = tile.rect.left - self.width
+                    self.vx = 0.0
+                elif self.vx < 0:
+                    self.x = tile.rect.right
+                    self.vx = 0.0
+                rect = self.rect
+        
+        # Room bounds X - always enforce
         if room_manager.current_room:
             bounds = room_manager.current_room.bounds
             if self.x < bounds.left:
                 if not self._has_adjacent_room(room_manager, "left"):
                     self.x = bounds.left
-                    self.vx = 0
+                    self.vx = 0.0
             if self.x + self.width > bounds.right:
                 if not self._has_adjacent_room(room_manager, "right"):
                     self.x = bounds.right - self.width
-                    self.vx = 0
+                    self.vx = 0.0
         
         # Move Y
         self.y += self.vy * dt
-        for col in room_manager.get_collisions(self.rect):
-            if self.vy > 0:
-                self.y = col.top - self.height
-                self.on_ground = True
-                self.vy = 0
-            elif self.vy < 0:
-                self.y = col.bottom
-                self.vy = 0
         
-        # Room edge collision Y
+        landed = False
+        rect = self.rect
+        
+        for tile in room_manager.get_collisions(rect):
+            if tile.tile_type == TILE_SOLID:
+                # Solid tiles block from all directions
+                if self.vy >= 0:
+                    self.y = tile.rect.top - self.height
+                    self.vy = 0.0
+                    landed = True
+                elif self.vy < 0:
+                    self.y = tile.rect.bottom
+                    self.vy = 0.0
+                rect = self.rect
+            
+            elif tile.tile_type == TILE_PLATFORM:
+                # One-way platforms: only collide when falling through from above
+                # Conditions:
+                # 1. Moving downward (vy >= 0)
+                # 2. Player's previous bottom was above or at platform top
+                # 3. Not holding down to drop through
+                if (self.vy >= 0 and 
+                    prev_bottom <= tile.rect.top + 4 and 
+                    not self.drop_through_platforms):
+                    self.y = tile.rect.top - self.height
+                    self.vy = 0.0
+                    landed = True
+                    rect = self.rect
+        
+        # Room bounds Y - always enforce
         if room_manager.current_room:
             bounds = room_manager.current_room.bounds
             if self.y < bounds.top:
                 if not self._has_adjacent_room(room_manager, "up"):
                     self.y = bounds.top
-                    self.vy = 0
+                    self.vy = 0.0
             if self.y + self.height > bounds.bottom:
                 if not self._has_adjacent_room(room_manager, "down"):
                     self.y = bounds.bottom - self.height
-                    self.on_ground = True
-                    self.vy = 0
+                    self.vy = 0.0
+                    landed = True
+        
+        # Ground check
+        if landed:
+            self.on_ground = True
+        else:
+            self.on_ground = self._check_ground_with_platforms(room_manager)
+    
+    def _check_ground_with_platforms(self, room_manager):
+        """Check if standing on solid ground or platform."""
+        # Check a thin rect below the player
+        test_rect = pygame.Rect(
+            int(self.x) + 2,
+            int(self.y) + self.height,
+            self.width - 4,
+            3
+        )
+        
+        for tile in room_manager.get_collisions(test_rect):
+            if tile.tile_type == TILE_SOLID:
+                return True
+            elif tile.tile_type == TILE_PLATFORM and not self.drop_through_platforms:
+                return True
+        
+        # Check room floor
+        if room_manager.current_room:
+            bounds = room_manager.current_room.bounds
+            if self.y + self.height >= bounds.bottom - 2:
+                return True
+        
+        return False
     
     def _has_adjacent_room(self, room_manager, direction):
-        """Check if there's an adjacent room in the given direction"""
+        """Check for adjacent room."""
         if not room_manager.current_room or not room_manager.rooms:
             return False
         
@@ -299,50 +526,108 @@ class Player:
             other = room.bounds
             
             if direction == "right":
-                if other.left <= current.right + 10 and other.left >= current.right - 10:
+                if abs(other.left - current.right) <= 10:
                     if other.top < current.bottom and other.bottom > current.top:
                         return True
             elif direction == "left":
-                if other.right >= current.left - 10 and other.right <= current.left + 10:
+                if abs(other.right - current.left) <= 10:
                     if other.top < current.bottom and other.bottom > current.top:
                         return True
             elif direction == "down":
-                if other.top <= current.bottom + 10 and other.top >= current.bottom - 10:
+                if abs(other.top - current.bottom) <= 10:
                     if other.left < current.right and other.right > current.left:
                         return True
             elif direction == "up":
-                if other.bottom >= current.top - 10 and other.bottom <= current.top + 10:
+                if abs(other.bottom - current.top) <= 10:
                     if other.left < current.right and other.right > current.left:
                         return True
         
         return False
     
+    # =========================================================================
+    # COMBAT
+    # =========================================================================
+    
+    def take_damage(self, amount, knockback_x=0, knockback_y=0):
+        """Take damage if not invincible."""
+        if self.is_invincible:
+            return False
+        
+        self.health -= amount
+        self.invincible_timer = 1.0
+        
+        # Apply knockback
+        self.vx = knockback_x
+        self.vy = knockback_y - 200
+        
+        # Cancel roll and grapple
+        self.rolling = False
+        self.grapple.cancel()
+        
+        return True
+    
+    # =========================================================================
+    # DRAW
+    # =========================================================================
+    
     def draw(self, surface, camera):
-        # Draw grapple first (behind player)
         self.grapple.draw(surface, camera, self)
+        
+        # Determine color based on state
+        if self.rolling:
+            # Flash during i-frames portion of roll
+            if self.roll_timer < ROLL_IFRAMES:
+                color = (255, 255, 150)  # Yellow-ish during i-frames
+            else:
+                color = (200, 200, 100)  # Slightly different during rest of roll
+        elif self.grapple.state == "attached":
+            color = (120, 180, 255)
+        elif self.wall_dir != 0:
+            color = (180, 180, 220)
+        elif self.sprinting:
+            color = (150, 255, 150)  # Brighter green when sprinting
+        else:
+            color = (100, 220, 120)
+        
+        # Flash when invincible (from damage, not roll)
+        if self.invincible_timer > 0 and not self.rolling:
+            if int(self.invincible_timer * 10) % 2 == 0:
+                color = (255, 255, 255)
         
         # Draw player
         screen_rect = camera.apply_rect(self.rect)
         
-        # Different color when grappling
-        if self.grapple.state == "attached":
-            color = self.grapple_color
+        if self.rolling:
+            # Squish effect during roll
+            squish = 0.7
+            roll_rect = pygame.Rect(
+                screen_rect.x,
+                screen_rect.y + screen_rect.height * (1 - squish) / 2,
+                screen_rect.width * 1.2,
+                screen_rect.height * squish
+            )
+            pygame.draw.rect(surface, color, roll_rect)
         else:
-            color = self.color
+            pygame.draw.rect(surface, color, screen_rect)
         
-        pygame.draw.rect(surface, color, screen_rect)
+        # Facing indicator (not during roll)
+        if not self.rolling:
+            cx, cy = screen_rect.centerx, screen_rect.centery
+            if self.facing_right:
+                points = [(cx + 7, cy), (cx + 1, cy - 4), (cx + 1, cy + 4)]
+            else:
+                points = [(cx - 7, cy), (cx - 1, cy - 4), (cx - 1, cy + 4)]
+            pygame.draw.polygon(surface, (255, 255, 255), points)
         
-        # Draw facing indicator (small triangle)
-        if self.facing_right:
-            points = [
-                (screen_rect.right - 4, screen_rect.centery - 4),
-                (screen_rect.right + 2, screen_rect.centery),
-                (screen_rect.right - 4, screen_rect.centery + 4),
-            ]
-        else:
-            points = [
-                (screen_rect.left + 4, screen_rect.centery - 4),
-                (screen_rect.left - 2, screen_rect.centery),
-                (screen_rect.left + 4, screen_rect.centery + 4),
-            ]
-        pygame.draw.polygon(surface, (255, 255, 255), points)
+        # Wall slide indicator
+        if self.wall_dir != 0 and not self.on_ground and not self.rolling:
+            for i in range(3):
+                py = screen_rect.top + 4 + i * 6
+                px = screen_rect.left - 2 if self.wall_dir < 0 else screen_rect.right + 2
+                pygame.draw.line(surface, (200, 200, 255), (px, py), (px, py + 3), 2)
+        
+        # Sprint particles (simple trailing effect)
+        if self.sprinting and self.on_ground and abs(self.vx) > 200:
+            trail_x = screen_rect.centerx - sign(self.vx) * 15
+            trail_y = screen_rect.bottom - 4
+            pygame.draw.circle(surface, (150, 255, 150), (int(trail_x), int(trail_y)), 3)

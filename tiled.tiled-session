@@ -1,0 +1,31 @@
+{
+    "Map/SizeTest": {
+        "height": 4300,
+        "width": 2
+    },
+    "activeFile": "",
+    "expandedProjectPaths": [
+    ],
+    "fileStates": {
+        "rooms/chapter_01.json": {
+            "scale": 0.12419270833333333,
+            "selectedLayer": 0,
+            "viewCenter": {
+                "x": 3776.389180121618,
+                "y": 1626.5045082826587
+            }
+        },
+        "rooms/tiles.tsx": {
+            "scaleInDock": 1,
+            "scaleInEditor": 1
+        }
+    },
+    "map.fixedSize": false,
+    "openFiles": [
+    ],
+    "project": "tiled.tiled-project",
+    "recentFiles": [
+        "rooms/tiles.tsx",
+        "rooms/chapter_01.json"
+    ]
+}
