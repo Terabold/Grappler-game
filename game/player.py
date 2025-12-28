@@ -74,23 +74,16 @@ class Player:
         self.frozen = False
         self.transition_dir = (0, 0)
         self.transition_slid = 0.0
-        self.transition_slide = 24
+        self.transition_slide = 200  # Increased to move player further during transition
         
         # Combat
         self.health = 100
         self.max_health = 100
         self.invincible_timer = 0.0
         
-        # Sword attack
-        self.attacking = False
-        self.attack_timer = 0.0
-        self.attack_duration = 0.25
-        self.attack_cooldown = 0.0
-        self.attack_damage = 25
-        self.attack_hit = False  # Prevent multi-hit per swing
-        
         # Flags for game state
         self.on_exit = False  # True when touching exit tile
+        self.exit_direction = None  # Direction of exit being touched
         self.dead = False
     
     @property
@@ -153,24 +146,9 @@ class Player:
         self.invincible_timer = max(0.0, self.invincible_timer - dt)
         self.wall_jump_lock_timer = max(0.0, self.wall_jump_lock_timer - dt)
         self.roll_cooldown = max(0.0, self.roll_cooldown - dt)
-        self.attack_cooldown = max(0.0, self.attack_cooldown - dt)
         
         if self.wall_jump_lock_timer <= 0:
             self.wall_jump_locked = False
-        
-        # Update attack
-        if self.attacking:
-            self.attack_timer += dt
-            if self.attack_timer >= self.attack_duration:
-                self.attacking = False
-                self.attack_cooldown = 0.3
-        
-        # Attack input (E key or middle mouse)
-        attack_pressed = keys[pygame.K_e] or mouse[1]
-        if attack_pressed and not self.attacking and self.attack_cooldown <= 0 and not self.rolling:
-            self.attacking = True
-            self.attack_timer = 0.0
-            self.attack_hit = False
         
         # Grapple input - RIGHT MOUSE ONLY (no keyboard conflict)
         grapple_pressed = mouse[2]  # Right mouse button only
@@ -596,6 +574,7 @@ class Player:
     def _check_tile_hazards(self, room_manager):
         """Check for spike damage and exit tiles."""
         self.on_exit = False
+        self.exit_direction = None
         
         for tile in room_manager.get_collisions(self.rect):
             if tile.tile_type == TILE_SPIKE:
@@ -603,48 +582,24 @@ class Player:
                 if not self.is_invincible:
                     self.take_damage(25, 0, -300)
             elif tile.tile_type == TILE_EXIT:
-                # Mark that we're on an exit
-                self.on_exit = True
-    
-    def get_attack_rect(self):
-        """Get the hitbox for sword attack - wide sweep."""
-        if not self.attacking:
-            return None
-        
-        # Larger, more forgiving attack hitbox
-        attack_width = 50
-        attack_height = 40
-        
-        if self.facing_right:
-            x = self.x + self.width - 5
-        else:
-            x = self.x - attack_width + 5
-        
-        y = self.y - 8
-        
-        return pygame.Rect(int(x), int(y), attack_width, attack_height)
-    
-    def auto_aim_at_enemies(self, enemies):
-        """Auto-face nearest enemy when attacking. Call before attack starts."""
-        if not enemies:
-            return
-        
-        nearest_dist = 150  # Auto-aim range
-        nearest_enemy = None
-        px, py = self.center
-        
-        for enemy in enemies:
-            if not enemy.alive:
-                continue
-            ex, ey = enemy.center
-            dist = ((px - ex) ** 2 + (py - ey) ** 2) ** 0.5
-            if dist < nearest_dist:
-                nearest_dist = dist
-                nearest_enemy = enemy
-        
-        if nearest_enemy:
-            ex, _ = nearest_enemy.center
-            self.facing_right = ex > px
+                # Determine exit direction based on position in room
+                room = room_manager.current_room
+                if room:
+                    # Check if exit is on the right edge
+                    if self.x + self.width >= room.bounds.right - 32:
+                        self.exit_direction = "right"
+                    # Check if exit is on the left edge
+                    elif self.x <= room.bounds.left + 32:
+                        self.exit_direction = "left"
+                    # Check if exit is on the bottom
+                    elif self.y + self.height >= room.bounds.bottom - 32:
+                        self.exit_direction = "down"
+                    # Check if exit is on the top
+                    elif self.y <= room.bounds.top + 32:
+                        self.exit_direction = "up"
+                    
+                    if self.exit_direction:
+                        self.on_exit = True
     
     # =========================================================================
     # COMBAT
@@ -725,35 +680,6 @@ class Player:
             else:
                 points = [(cx - 7, cy), (cx - 1, cy - 4), (cx - 1, cy + 4)]
             pygame.draw.polygon(surface, (255, 255, 255), points)
-        
-        # Sword attack visual
-        if self.attacking:
-            attack_rect = self.get_attack_rect()
-            if attack_rect:
-                screen_attack = camera.apply_rect(attack_rect)
-                # Sword swing arc
-                progress = self.attack_timer / self.attack_duration
-                alpha = int(255 * (1 - progress))
-                
-                # Draw sword blade
-                sword_color = (200, 200, 255)
-                if self.facing_right:
-                    # Swing arc right
-                    start_angle = -0.5 + progress * 1.5
-                    sword_points = [
-                        (screen_attack.left, screen_attack.centery),
-                        (screen_attack.right, screen_attack.top + int(screen_attack.height * progress)),
-                        (screen_attack.right - 5, screen_attack.centery),
-                    ]
-                else:
-                    # Swing arc left
-                    sword_points = [
-                        (screen_attack.right, screen_attack.centery),
-                        (screen_attack.left, screen_attack.top + int(screen_attack.height * progress)),
-                        (screen_attack.left + 5, screen_attack.centery),
-                    ]
-                pygame.draw.polygon(surface, sword_color, sword_points)
-                pygame.draw.polygon(surface, (255, 255, 255), sword_points, 2)
         
         # Wall slide indicator
         if self.wall_dir != 0 and not self.on_ground and not self.rolling:

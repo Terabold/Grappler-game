@@ -8,7 +8,6 @@ from worldeditor import WorldEditor
 from game.camera import Camera
 from game.room import RoomManager
 from game.player import Player
-from game.enemy import EnemyManager
 
 
 class Game:
@@ -36,7 +35,8 @@ class Game:
         self.camera = None
         self.room_manager = None
         self.player = None
-        self.enemy_manager = None
+        self.current_transition_direction = None
+        self.previous_room_id = None
         
         self.show_debug = True
     
@@ -79,7 +79,7 @@ class Game:
         self.state = "editor"
 
     def start_world_editor(self):
-        self.world_editor = WorldEditor(self)
+        self.world_editor = WorldEditor(game=self)
         self.state = "world_editor"
     
     def start_game(self):
@@ -94,11 +94,8 @@ class Game:
         spawn = self.room_manager.spawn
         self.player = Player(spawn[0], spawn[1])
         
-        # Initialize enemies
-        self.enemy_manager = EnemyManager()
-        # Add some test enemies in the first room
-        self.enemy_manager.add_enemy(spawn[0] + 200, spawn[1] - 50)
-        self.enemy_manager.add_enemy(spawn[0] + 350, spawn[1] - 50)
+        # Set initial previous room to "start" for entry point logic
+        self.previous_room_id = "start"
         
         self.state = "playing"
     
@@ -212,51 +209,62 @@ class Game:
         # Update player
         self.player.update(dt, self.room_manager, controls, self.camera)
         
-        # Update enemies
-        if self.enemy_manager:
-            self.enemy_manager.update(dt, self.room_manager, self.player)
-            
-            # Auto-aim when starting attack
-            if self.player.attacking and self.player.attack_timer < 0.05:
-                self.player.auto_aim_at_enemies(self.enemy_manager.enemies)
-            
-            # Check sword attack hits
-            attack_rect = self.player.get_attack_rect()
-            if attack_rect and not self.player.attack_hit:
-                direction = 1 if self.player.facing_right else -1
-                hits = self.enemy_manager.check_sword_hit(attack_rect, self.player.attack_damage, direction)
-                if hits > 0:
-                    self.player.attack_hit = True  # Prevent multi-hit
-        
         # Check for exit
-        if self.player.on_exit:
-            # For now, just show a message (could trigger level complete)
-            pass
+        if self.player.on_exit and not self.camera.transitioning:
+            # Determine target room based on current room and exit direction
+            current_room_id = self.room_manager.current_room.room_id
+            direction = self.player.exit_direction
+            
+            target_room_id = None
+            if current_room_id == "room_01" and direction == "right":
+                target_room_id = "room_02"
+            elif current_room_id == "room_02" and direction == "right":
+                target_room_id = "room_03"
+            elif current_room_id == "room_02" and direction == "left":
+                target_room_id = "room_01"
+            elif current_room_id == "room_03" and direction == "left":
+                target_room_id = "room_02"
+            # Add more transitions as needed
+            
+            if target_room_id:
+                self.previous_room_id = current_room_id
+                self.current_transition_direction = direction
+                self.player.start_transition(direction)
+                self.room_manager.transition_to(target_room_id, direction, self._on_room_transition_complete)
         
-        # Room transition
+        # Room transition (fallback for bounds-based transitions)
         transition = self.room_manager.check_room_transition(self.player.rect)
         if transition and not self.camera.transitioning:
             room_id, direction = transition
+            self.previous_room_id = self.room_manager.current_room.room_id
+            self.current_transition_direction = direction
             self.player.start_transition(direction)
-            self.room_manager.transition_to(room_id, direction, self.player.end_transition)
+            self.room_manager.transition_to(room_id, direction, self._on_room_transition_complete)
         
         cx, cy = self.player.center
         self.camera.follow(cx, cy, dt)
+    
+    def _on_room_transition_complete(self):
+        """Called when room transition completes - position player at appropriate entry point."""
+        # Use the previous room ID to find the correct entry point
+        if self.room_manager.current_room and self.previous_room_id:
+            entry_world = self.room_manager.current_room.get_entry_world(self.previous_room_id)
+            self.player.x = entry_world[0]
+            self.player.y = entry_world[1]
+            self.player.vx = 0.0
+            self.player.vy = 0.0
+        
+        # Unfreeze player
+        self.player.end_transition()
     
     def _respawn_player(self):
         """Respawn player at spawn point."""
         spawn = self.room_manager.spawn
         self.player = Player(spawn[0], spawn[1])
-        if self.enemy_manager:
-            self.enemy_manager.reset()
     
     def draw_game(self):
         self.screen.fill((15, 15, 25))
         self.room_manager.draw(self.screen, self.camera)
-        
-        # Draw enemies
-        if self.enemy_manager:
-            self.enemy_manager.draw(self.screen, self.camera)
         
         self.player.draw(self.screen, self.camera)
         
@@ -298,17 +306,6 @@ class Game:
         health_text = f"{self.player.health}/{self.player.max_health}"
         text_surf = font.render(health_text, True, (255, 255, 255))
         self.screen.blit(text_surf, (bar_x + bar_width + 8, bar_y))
-        
-        # Attack indicator (show when can attack)
-        if self.player.attack_cooldown <= 0 and not self.player.attacking:
-            pygame.draw.circle(self.screen, (200, 200, 255), (bar_x + bar_width + 60, bar_y + bar_height // 2), 6)
-        
-        # Exit indicator
-        if self.player.on_exit:
-            exit_font = pygame.font.Font(None, 36)
-            exit_text = exit_font.render("EXIT - Press E to continue", True, (100, 255, 100))
-            text_rect = exit_text.get_rect(center=(self.width // 2, 50))
-            self.screen.blit(exit_text, text_rect)
     
     def _draw_aim_indicator(self):
         """Draw subtle aim dots."""

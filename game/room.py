@@ -49,8 +49,8 @@ class Room:
         # Pixel bounds in world space
         self.bounds = None
         
-        # Spawn point (local to room)
-        self.spawn = None
+        # Entry points keyed by source room ID
+        self.entry_points = {}  # room_id -> (x, y)
         
         self._load(filepath)
     
@@ -107,19 +107,39 @@ class Room:
                         self.tiles[y][x] = TILE_SOLID
     
     def _parse_objects(self, layer):
-        """Parse object layer for spawn points etc."""
+        """Parse object layer for spawn points and entry points."""
         for obj in layer.get('objects', []):
             obj_type = obj.get('type', '').lower()
             obj_name = obj.get('name', '').lower()
             
             if 'spawn' in obj_type or 'spawn' in obj_name:
                 self.spawn = (obj.get('x', 64), obj.get('y', 64))
+            elif obj_type == 'entry' or obj_name == 'entry':
+                # Entry point with from_room property
+                from_room = obj.get('properties', {}).get('from_room') or obj.get('from_room')
+                if from_room:
+                    self.entry_points[from_room] = (obj.get('x', 64), obj.get('y', 64))
+            # Legacy support for direction-based entries
+            elif obj_type in ['left_entry', 'right_entry', 'up_entry', 'down_entry']:
+                direction = obj_type.replace('_entry', '')
+                self.entry_points[direction] = (obj.get('x', 64), obj.get('y', 64))
+            elif obj_name in ['left_entry', 'right_entry', 'up_entry', 'down_entry']:
+                direction = obj_name.replace('_entry', '')
+                self.entry_points[direction] = (obj.get('x', 64), obj.get('y', 64))
     
     def get_spawn_world(self):
         """Get spawn point in world coordinates."""
         if self.spawn:
             return (self.world_x + self.spawn[0], self.world_y + self.spawn[1])
         return (self.world_x + 64, self.world_y + 64)
+    
+    def get_entry_world(self, from_room_id):
+        """Get entry point in world coordinates for a specific source room."""
+        entry = self.entry_points.get(from_room_id)
+        if entry:
+            return (self.world_x + entry[0], self.world_y + entry[1])
+        # Fallback to spawn if no entry point for this room
+        return self.get_spawn_world()
     
     def contains_point(self, x, y):
         """Check if world point is inside this room."""

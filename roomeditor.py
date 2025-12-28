@@ -67,10 +67,12 @@ class RoomData:
         self.width = width
         self.height = height
         self.tiles = [[TILE_EMPTY] * width for _ in range(height)]
-        self.spawn_x = 2
-        self.spawn_y = height - 2
-        self.filename = None
+        # Entry points: list of (x, y, from_room)
+        self.entry_points = []
+        # Index of entry point that serves as start/respawn point (None if none set)
+        self.start_entry_index = None
         self.modified = False
+        self.filename = None
     
     def resize(self, new_width, new_height):
         """Resize room, preserving existing tiles."""
@@ -83,11 +85,21 @@ class RoomData:
         self.tiles = new_tiles
         self.width = new_width
         self.height = new_height
-        self.modified = True
         
-        # Keep spawn in bounds
-        self.spawn_x = min(self.spawn_x, new_width - 1)
-        self.spawn_y = min(self.spawn_y, new_height - 1)
+        # Keep entry points in bounds
+        new_entry_points = []
+        for i, (x, y, from_room) in enumerate(self.entry_points):
+            new_x = min(x, new_width - 1)
+            new_y = min(y, new_height - 1)
+            new_entry_points.append((new_x, new_y, from_room))
+        
+        self.entry_points = new_entry_points
+        
+        # Update start entry index if it's still valid
+        if self.start_entry_index is not None and self.start_entry_index >= len(self.entry_points):
+            self.start_entry_index = None
+            
+        self.modified = True
     
     def set_tile(self, x, y, tile_type):
         """Set a tile, return True if changed."""
@@ -98,18 +110,45 @@ class RoomData:
                 return True
         return False
     
-    def get_tile(self, x, y):
-        """Get tile at position."""
-        if 0 <= x < self.width and 0 <= y < self.height:
-            return self.tiles[y][x]
-        return TILE_EMPTY
-    
     def set_spawn(self, x, y):
         """Set spawn point."""
         if 0 <= x < self.width and 0 <= y < self.height:
             self.spawn_x = x
             self.spawn_y = y
             self.modified = True
+    
+    def get_tile(self, x, y):
+        """Get tile at position."""
+        if 0 <= x < self.width and 0 <= y < self.height:
+            return self.tiles[y][x]
+        return TILE_EMPTY
+    
+    def add_entry_point(self, x, y, from_room="start"):
+        """Add an entry point."""
+        self.entry_points.append((x, y, from_room))
+        self.modified = True
+    
+    def remove_entry_point(self, index):
+        """Remove an entry point."""
+        if 0 <= index < len(self.entry_points):
+            self.entry_points.pop(index)
+            self.modified = True
+    
+    def set_entry_point_room(self, index, from_room):
+        """Set the from_room for an entry point."""
+        if 0 <= index < len(self.entry_points):
+            x, y, _ = self.entry_points[index]
+            self.entry_points[index] = (x, y, from_room)
+            self.modified = True
+    
+    def set_entry_point_start(self, index, is_start):
+        """Set whether an entry point is the start point."""
+        if is_start:
+            # Only one start point allowed - clear any existing
+            self.start_entry_index = index
+        elif self.start_entry_index == index:
+            self.start_entry_index = None
+        self.modified = True
     
     def fill_borders(self):
         """Fill room borders with solid tiles."""
@@ -151,11 +190,15 @@ class RoomData:
                     "type": "objectgroup",
                     "objects": [
                         {
-                            "name": "spawn",
-                            "type": "spawn",
-                            "x": self.spawn_x * TILE_SIZE + TILE_SIZE // 2,
-                            "y": self.spawn_y * TILE_SIZE + TILE_SIZE // 2
-                        }
+                            "name": "entry",
+                            "type": "entry",
+                            "x": x * TILE_SIZE + TILE_SIZE // 2,
+                            "y": y * TILE_SIZE + TILE_SIZE // 2,
+                            "properties": {
+                                "from_room": from_room,
+                                "is_start": i == self.start_entry_index
+                            }
+                        } for i, (x, y, from_room) in enumerate(self.entry_points)
                     ]
                 }
             ]
@@ -178,9 +221,17 @@ class RoomData:
             
             elif layer.get("type") == "objectgroup":
                 for obj in layer.get("objects", []):
-                    if "spawn" in obj.get("name", "").lower() or "spawn" in obj.get("type", "").lower():
-                        self.spawn_x = int(obj.get("x", 64) // TILE_SIZE)
-                        self.spawn_y = int(obj.get("y", 64) // TILE_SIZE)
+                    if obj.get("type") == "entry" or obj.get("name") == "entry":
+                        x = int(obj.get("x", 64) // TILE_SIZE)
+                        y = int(obj.get("y", 64) // TILE_SIZE)
+                        from_room = obj.get("properties", {}).get("from_room") or obj.get("from_room", "start")
+                        is_start = obj.get("properties", {}).get("is_start", False)
+                        
+                        self.entry_points.append((x, y, from_room))
+                        
+                        # Set start entry index
+                        if is_start:
+                            self.start_entry_index = len(self.entry_points) - 1
         
         self.modified = False
     
@@ -518,6 +569,274 @@ class FileDialog:
         surface.blit(confirm_surf, confirm_surf.get_rect(center=confirm_rect.center))
 
 
+class EntryPointEditor:
+    """Dialog for editing entry point properties with room dropdown."""
+    
+    def __init__(self, x, y, entry_index, from_room, callback, rooms_dir, is_start=False):
+        # Get available rooms first
+        self.available_rooms = ["start"]  # Always include start
+        if os.path.exists(rooms_dir):
+            for f in sorted(os.listdir(rooms_dir)):
+                if f.endswith('.json') and f != 'world.json':
+                    room_name = f.replace('.json', '')
+                    if room_name not in self.available_rooms:
+                        self.available_rooms.append(room_name)
+        
+        # Calculate dialog height based on number of rooms (max 8 visible options)
+        max_visible_options = min(8, len(self.available_rooms))
+        dialog_height = 100 + max_visible_options * 24 + 50  # title + options + checkbox + buttons
+        
+        # Position dialog with click position inside it
+        x = x - 125  # Center on x
+        y = y - dialog_height // 2  # Center on y
+        
+        # Fit dialog to screen
+        screen = pygame.display.get_surface()
+        if screen:
+            screen_width, screen_height = screen.get_size()
+            if x + 250 > screen_width:
+                x = screen_width - 250
+            if y + dialog_height > screen_height:
+                y = screen_height - dialog_height
+            if x < 0:
+                x = 0
+            if y < 0:
+                y = 0
+        
+        self.rect = pygame.Rect(x, y, 250, dialog_height)
+        self.entry_index = entry_index
+        self.callback = callback
+        self.active = True
+        
+        # Dropdown for room selection
+        self.selected_room_index = 0
+        for i, room in enumerate(self.available_rooms):
+            if room == from_room:
+                self.selected_room_index = i
+                break
+        
+        self.dropdown_rect = pygame.Rect(x + 10, y + 40, 230, 24)
+        self.dropdown_expanded = False
+        
+        # Scrolling for dropdown
+        self.scroll_offset = 0
+        self.max_visible_options = max_visible_options
+        self.option_height = 24
+        
+        # Checkbox for start point
+        self.is_start_checkbox = pygame.Rect(x + 10, y + 40 + 24 + self.max_visible_options * self.option_height + 10, 20, 20)
+        self.is_start = is_start
+        
+        # Buttons - position them below the checkbox area
+        button_y = y + 40 + 24 + self.max_visible_options * self.option_height + 40
+        self.ok_btn = Button(x + 10, button_y, 80, 24, "OK", self.confirm)
+        self.cancel_btn = Button(x + 160, button_y, 80, 24, "Cancel", self.close)
+        
+        # Track mouse state
+        self.last_mouse_pos = (0, 0)
+        self.mouse_clicked = False
+    
+    def confirm(self):
+        """Confirm changes."""
+        from_room = self.available_rooms[self.selected_room_index]
+        self.callback(self.entry_index, from_room, self.is_start)
+        self.close()
+    
+    def close(self):
+        """Close dialog."""
+        self.active = False
+    
+    def handle_event(self, event):
+        """Handle input events."""
+        if not self.active:
+            return
+        
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            mouse_pos = event.pos
+            self.mouse_clicked = True
+            
+            # Check if clicked outside dialog
+            if not self.rect.collidepoint(mouse_pos):
+                self.close()
+                return
+            
+            # Handle dropdown
+            if self.dropdown_rect.collidepoint(mouse_pos):
+                self.dropdown_expanded = not self.dropdown_expanded
+            elif self.is_start_checkbox.collidepoint(mouse_pos):
+                self.is_start = not self.is_start
+            elif self.dropdown_expanded:
+                # Check if clicking on options
+                options_start_y = self.rect.y + 40 + 24
+                for i in range(self.max_visible_options):
+                    option_index = self.scroll_offset + i
+                    if option_index >= len(self.available_rooms):
+                        break
+                    
+                    option_rect = pygame.Rect(
+                        self.rect.x + 10, 
+                        options_start_y + i * self.option_height, 
+                        230, 
+                        self.option_height
+                    )
+                    
+                    if option_rect.collidepoint(mouse_pos):
+                        self.selected_room_index = option_index
+                        self.dropdown_expanded = False
+                        break
+                
+                # Check scroll buttons (if needed)
+                if len(self.available_rooms) > self.max_visible_options:
+                    # Up arrow
+                    up_arrow_rect = pygame.Rect(self.rect.right - 20, options_start_y, 10, 15)
+                    if up_arrow_rect.collidepoint(mouse_pos) and self.scroll_offset > 0:
+                        self.scroll_offset -= 1
+                    
+                    # Down arrow  
+                    down_arrow_rect = pygame.Rect(self.rect.right - 20, options_start_y + self.max_visible_options * self.option_height - 15, 10, 15)
+                    if down_arrow_rect.collidepoint(mouse_pos) and self.scroll_offset < len(self.available_rooms) - self.max_visible_options:
+                        self.scroll_offset += 1
+            
+            # Handle checkbox
+            elif self.is_start_checkbox.collidepoint(mouse_pos):
+                self.is_start = not self.is_start
+        
+        elif event.type == pygame.MOUSEWHEEL and self.dropdown_expanded:
+            if event.y > 0 and self.scroll_offset > 0:
+                self.scroll_offset -= 1
+            elif event.y < 0 and self.scroll_offset < len(self.available_rooms) - self.max_visible_options:
+                self.scroll_offset += 1
+        
+        elif event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_RETURN:
+                self.confirm()
+            elif event.key == pygame.K_ESCAPE:
+                self.close()
+    
+    def update(self, dt, mouse_pos):
+        """Update dialog state."""
+        self.last_mouse_pos = mouse_pos
+        
+        # Update buttons
+        self.ok_btn.update(mouse_pos, self.mouse_clicked)
+        self.cancel_btn.update(mouse_pos, self.mouse_clicked)
+        
+        # Reset click state
+        self.mouse_clicked = False
+    
+    def draw(self, surface, font):
+        """Draw dialog."""
+        if not self.active:
+            return
+        
+        # Dim background
+        dim = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
+        dim.fill((0, 0, 0, 150))
+        surface.blit(dim, (0, 0))
+        
+        # Dialog box
+        pygame.draw.rect(surface, COLOR_PANEL, self.rect)
+        pygame.draw.rect(surface, COLOR_ACCENT, self.rect, 2)
+        
+        # Title
+        title_surf = font.render("Edit Entry Point", True, COLOR_TEXT)
+        surface.blit(title_surf, (self.rect.x + 10, self.rect.y + 10))
+        
+        # Label
+        label_surf = font.render("From Room:", True, COLOR_TEXT_DIM)
+        surface.blit(label_surf, (self.rect.x + 10, self.rect.y + 25))
+        
+        # Checkbox for start point
+        checkbox_label_surf = font.render("Make this the start point", True, COLOR_TEXT_DIM)
+        surface.blit(checkbox_label_surf, (self.rect.x + 35, self.rect.y + 40 + 24 + self.max_visible_options * self.option_height + 12))
+        
+        # Checkbox
+        pygame.draw.rect(surface, COLOR_BUTTON, self.is_start_checkbox)
+        pygame.draw.rect(surface, COLOR_GRID_MAJOR, self.is_start_checkbox, 1)
+        if self.is_start:
+            # Draw checkmark
+            pygame.draw.line(surface, COLOR_TEXT, 
+                           (self.is_start_checkbox.left + 3, self.is_start_checkbox.centery),
+                           (self.is_start_checkbox.centerx - 1, self.is_start_checkbox.bottom - 3), 2)
+            pygame.draw.line(surface, COLOR_TEXT,
+                           (self.is_start_checkbox.centerx - 1, self.is_start_checkbox.bottom - 3),
+                           (self.is_start_checkbox.right - 3, self.is_start_checkbox.top + 3), 2)
+        
+        # Dropdown button
+        dropdown_color = COLOR_BUTTON_HOVER if self.dropdown_rect.collidepoint(self.last_mouse_pos) else COLOR_BUTTON
+        pygame.draw.rect(surface, dropdown_color, self.dropdown_rect)
+        pygame.draw.rect(surface, COLOR_ACCENT if self.dropdown_expanded else COLOR_GRID_MAJOR, self.dropdown_rect, 1)
+        
+        # Selected room text
+        selected_room = self.available_rooms[self.selected_room_index]
+        text_surf = font.render(selected_room, True, COLOR_TEXT)
+        surface.blit(text_surf, (self.dropdown_rect.x + 5, self.dropdown_rect.y + 4))
+        
+        # Dropdown arrow
+        arrow_points = [
+            (self.dropdown_rect.right - 15, self.dropdown_rect.centery - 3),
+            (self.dropdown_rect.right - 10, self.dropdown_rect.centery + 3),
+            (self.dropdown_rect.right - 5, self.dropdown_rect.centery - 3)
+        ]
+        pygame.draw.polygon(surface, COLOR_TEXT, arrow_points)
+        
+        # Dropdown options (when expanded)
+        if self.dropdown_expanded:
+            options_area_height = self.max_visible_options * self.option_height
+            expanded_rect = pygame.Rect(
+                self.rect.x + 10, 
+                self.rect.y + 40 + 24, 
+                230, 
+                options_area_height
+            )
+            pygame.draw.rect(surface, COLOR_BG, expanded_rect)
+            pygame.draw.rect(surface, COLOR_ACCENT, expanded_rect, 1)
+            
+            # Draw visible options
+            for i in range(self.max_visible_options):
+                option_index = self.scroll_offset + i
+                if option_index >= len(self.available_rooms):
+                    break
+                
+                room = self.available_rooms[option_index]
+                option_rect = pygame.Rect(
+                    self.rect.x + 10, 
+                    self.rect.y + 40 + 24 + i * self.option_height, 
+                    230, 
+                    self.option_height
+                )
+                
+                option_color = COLOR_BUTTON_HOVER if option_rect.collidepoint(self.last_mouse_pos) else COLOR_BG
+                pygame.draw.rect(surface, option_color, option_rect)
+                
+                text_surf = font.render(room, True, COLOR_TEXT)
+                surface.blit(text_surf, (option_rect.x + 5, option_rect.y + 4))
+            
+            # Draw scroll indicators if needed
+            if len(self.available_rooms) > self.max_visible_options:
+                # Up arrow
+                up_color = COLOR_TEXT if self.scroll_offset > 0 else COLOR_TEXT_DIM
+                up_points = [
+                    (self.rect.right - 15, self.rect.y + 40 + 24 + 7),
+                    (self.rect.right - 10, self.rect.y + 40 + 24 + 2),
+                    (self.rect.right - 5, self.rect.y + 40 + 24 + 7)
+                ]
+                pygame.draw.polygon(surface, up_color, up_points)
+                
+                # Down arrow
+                down_color = COLOR_TEXT if self.scroll_offset < len(self.available_rooms) - self.max_visible_options else COLOR_TEXT_DIM
+                down_points = [
+                    (self.rect.right - 15, self.rect.y + 40 + 24 + options_area_height - 7),
+                    (self.rect.right - 10, self.rect.y + 40 + 24 + options_area_height - 2),
+                    (self.rect.right - 5, self.rect.y + 40 + 24 + options_area_height - 7)
+                ]
+                pygame.draw.polygon(surface, down_color, down_points)
+        
+        # Buttons
+        self.ok_btn.draw(surface, font)
+        self.cancel_btn.draw(surface, font)
+
+
 # ============================================================================
 # ROOM EDITOR
 # ============================================================================
@@ -525,12 +844,16 @@ class FileDialog:
 class RoomEditor:
     """Main room editor application."""
     
-    def __init__(self, game=None, rooms_dir="rooms"):
+    def __init__(self, rooms_dir="rooms", game=None):
+        # Handle case where first argument is actually rooms_dir (when called from main)
+        if isinstance(game, str):
+            rooms_dir = game
+            game = None
+        
         if game:
             self.game = game
             self.screen = game.screen
-            # Ensure rooms directory is absolute or relative to main script
-            self.rooms_dir = os.path.join(os.path.dirname(__file__), "rooms")
+            self.rooms_dir = rooms_dir
         else:
             pygame.init()
             self.game = None
@@ -561,7 +884,7 @@ class RoomEditor:
         
         # Tools
         self.current_tile = TILE_SOLID
-        self.tool = "paint"  # paint, fill, line, rect, spawn
+        self.tool = "paint"  # paint, fill, line, rect, spawn, entry
         self.painting = False
         self.erasing = False
         
@@ -571,6 +894,14 @@ class RoomEditor:
         # UI
         self.panel_width = 200
         self.setup_ui()
+        
+        # Entry point editor
+        self.entry_editor = None  # Will be EntryPointEditor instance
+        self.selected_entry_point = None  # Index of selected entry point
+        
+        # Double-click detection for entry points
+        self._last_entry_click = 0
+        self._last_entry_index = None
         
         # File dialog
         self.file_dialog = FileDialog(200, 100, 400, 400, rooms_dir)
@@ -607,24 +938,24 @@ class RoomEditor:
         # Tool buttons in a row/compact vertical list
         self.tool_buttons = []
         tools = [("Paint", "paint"), ("Fill", "fill"), ("Line", "line"), 
-                 ("Rect", "rect"), ("Spawn", "spawn")]
+                 ("Rect", "rect"), ("Entry", "entry")]
         
         y = 170
         for i, (name, tool) in enumerate(tools):
-            btn = Button(15, y + i * 28, 80, 24, name, toggle=True)
+            btn = Button(15, y + i * 32, 80, 26, name, toggle=True)
             btn.tool = tool
             if tool == self.tool:
                 btn.active = True
             self.tool_buttons.append(btn)
         
         # Size inputs
-        y_size = 320
+        y_size = 350
         self.width_input = InputBox(15, y_size, 50, 22, str(self.room.width), "W")
         self.height_input = InputBox(80, y_size, 50, 22, str(self.room.height), "H")
         self.resize_btn = Button(140, y_size, 40, 22, "Set", self.apply_resize)
         
         # Action buttons - compact 2-column layout
-        y = 370
+        y = 400
         btn_w = 85
         btn_h = 26
         gap = 5
@@ -639,7 +970,7 @@ class RoomEditor:
         ]
         
         # Back button at bottom
-        self.action_buttons.append(Button(15, self.screen.get_height() - 40, self.panel_width - 30, 30, "Back to Menu", self.exit_editor))
+        self.action_buttons.append(Button(15, self.screen.get_height() - 80, self.panel_width - 30, 35, "Back to Menu", self.exit_editor))
         
     def exit_editor(self):
         """Exit the editor."""
@@ -654,8 +985,8 @@ class RoomEditor:
         """Save current state for undo."""
         state = {
             'tiles': [row[:] for row in self.room.tiles],
-            'spawn_x': self.room.spawn_x,
-            'spawn_y': self.room.spawn_y,
+            'entry_points': self.room.entry_points[:],
+            'start_entry_index': self.room.start_entry_index
         }
         self.undo_stack.append(state)
         if len(self.undo_stack) > self.max_undo:
@@ -672,14 +1003,15 @@ class RoomEditor:
             'tiles': [row[:] for row in self.room.tiles],
             'spawn_x': self.room.spawn_x,
             'spawn_y': self.room.spawn_y,
+            'entry_points': self.room.entry_points[:]
         }
         self.redo_stack.append(current)
         
         # Restore previous
         state = self.undo_stack.pop()
         self.room.tiles = state['tiles']
-        self.room.spawn_x = state['spawn_x']
-        self.room.spawn_y = state['spawn_y']
+        self.room.entry_points = state['entry_points']
+        self.room.start_entry_index = state.get('start_entry_index', None)
         self.room.modified = True
         self.show_message("Undo")
     
@@ -699,8 +1031,8 @@ class RoomEditor:
         # Restore
         state = self.redo_stack.pop()
         self.room.tiles = state['tiles']
-        self.room.spawn_x = state['spawn_x']
-        self.room.spawn_y = state['spawn_y']
+        self.room.entry_points = state['entry_points']
+        self.room.start_entry_index = state.get('start_entry_index', None)
         self.room.modified = True
         self.show_message("Redo")
     
@@ -753,6 +1085,13 @@ class RoomEditor:
             self.save_undo()
             self.room.resize(new_width, new_height)
             self.show_message(f"Resized to {new_width}x{new_height}")
+    
+    def edit_entry_point(self, index, from_room, is_start=False):
+        """Edit an entry point's from_room and start status."""
+        self.save_undo()
+        self.room.set_entry_point_room(index, from_room)
+        self.room.set_entry_point_start(index, is_start)
+        self.show_message(f"Entry point updated")
     
     def center_view(self):
         """Center view on room."""
@@ -873,6 +1212,11 @@ class RoomEditor:
                         self.show_message(f"Loaded: {os.path.basename(result)}")
                 continue
             
+            # Entry editor
+            if self.entry_editor and self.entry_editor.active:
+                self.entry_editor.handle_event(event)
+                continue
+            
             # Input boxes
             self.width_input.handle_event(event)
             self.height_input.handle_event(event)
@@ -880,18 +1224,64 @@ class RoomEditor:
             if event.type == pygame.MOUSEBUTTONDOWN:
                 mouse_clicked = True
                 
-                # Middle mouse / right mouse for camera drag
-                if event.button in (2, 3):
-                    self.dragging_camera = True
-                    self.last_mouse_pos = event.pos
+                # Right click to remove
+                if event.button == 3 and event.pos[0] > self.panel_width:
+                    tile_x, tile_y = self.screen_to_tile(*event.pos)
+                    
+                    # Check if clicking on an entry point
+                    removed_entry = False
+                    for i, (ex, ey, from_room) in enumerate(self.room.entry_points):
+                        if ex == tile_x and ey == tile_y:
+                            self.save_undo()
+                            self.room.remove_entry_point(i)
+                            if self.selected_entry_point == i:
+                                self.selected_entry_point = None
+                            elif self.selected_entry_point and self.selected_entry_point > i:
+                                self.selected_entry_point -= 1
+                            self.show_message("Entry point removed")
+                            removed_entry = True
+                            break
+                    
+                    # If not an entry point, clear the tile
+                    if not removed_entry and 0 <= tile_x < self.room.width and 0 <= tile_y < self.room.height:
+                        if self.room.tiles[tile_y][tile_x] != TILE_EMPTY:
+                            self.save_undo()
+                            self.room.set_tile(tile_x, tile_y, TILE_EMPTY)
+                            self.show_message("Tile cleared")
                 
                 # Left click for tools (in canvas area)
                 elif event.button == 1 and event.pos[0] > self.panel_width:
                     tile_x, tile_y = self.screen_to_tile(*event.pos)
                     
-                    if self.tool == "spawn":
-                        self.save_undo()
-                        self.room.set_spawn(tile_x, tile_y)
+                    if self.tool == "entry":
+                        # Check if clicking on existing entry point
+                        clicked_existing = False
+                        for i, (ex, ey, from_room) in enumerate(self.room.entry_points):
+                            if ex == tile_x and ey == tile_y:
+                                self.selected_entry_point = i
+                                clicked_existing = True
+                                
+                                # Check for double click
+                                current_time = pygame.time.get_ticks()
+                                if hasattr(self, '_last_entry_click') and hasattr(self, '_last_entry_index'):
+                                    if (current_time - self._last_entry_click < 400 and 
+                                        self._last_entry_index == i):
+                                        # Double click - edit entry point
+                                        is_start = (i == self.room.start_entry_index)
+                                        self.entry_editor = EntryPointEditor(
+                                            event.pos[0], event.pos[1], i, from_room, self.edit_entry_point, self.rooms_dir, is_start
+                                        )
+                                        break
+                                
+                                self._last_entry_click = current_time
+                                self._last_entry_index = i
+                                break
+                        
+                        if not clicked_existing:
+                            self.save_undo()
+                            # For now, default to "start" - user can edit later
+                            self.room.add_entry_point(tile_x, tile_y, "start")
+                            self.selected_entry_point = len(self.room.entry_points) - 1
                     elif self.tool == "fill":
                         target = self.room.get_tile(tile_x, tile_y)
                         self.save_undo()
@@ -902,6 +1292,31 @@ class RoomEditor:
                         self.painting = True
                         self.save_undo()
                         self.room.set_tile(tile_x, tile_y, self.current_tile)
+                
+                # Right click to remove
+                elif event.button == 3 and event.pos[0] > self.panel_width:
+                    tile_x, tile_y = self.screen_to_tile(*event.pos)
+                    
+                    # Check if clicking on an entry point
+                    removed_entry = False
+                    for i, (ex, ey, from_room) in enumerate(self.room.entry_points):
+                        if ex == tile_x and ey == tile_y:
+                            self.save_undo()
+                            self.room.remove_entry_point(i)
+                            if self.selected_entry_point == i:
+                                self.selected_entry_point = None
+                            elif self.selected_entry_point and self.selected_entry_point > i:
+                                self.selected_entry_point -= 1
+                            self.show_message("Entry point removed")
+                            removed_entry = True
+                            break
+                    
+                    # If not an entry point, clear the tile
+                    if not removed_entry and 0 <= tile_x < self.room.width and 0 <= tile_y < self.room.height:
+                        if self.room.tiles[tile_y][tile_x] != TILE_EMPTY:
+                            self.save_undo()
+                            self.room.set_tile(tile_x, tile_y, TILE_EMPTY)
+                            self.show_message("Tile cleared")
                 
                 # Scroll to zoom
                 elif event.button == 4:  # Scroll up
@@ -997,15 +1412,37 @@ class RoomEditor:
                     self.set_tool("line")
                 elif event.key == pygame.K_r:
                     self.set_tool("rect")
-                elif event.key == pygame.K_p:
-                    self.set_tool("spawn")
+                elif event.key == pygame.K_e:
+                    self.set_tool("entry")
+                
+                # WASD movement
+                elif event.key == pygame.K_w:
+                    self.camera_y += 50
+                elif event.key == pygame.K_s:
+                    self.camera_y -= 50
+                elif event.key == pygame.K_a:
+                    self.camera_x += 50
+                elif event.key == pygame.K_d:
+                    self.camera_x -= 50
+                
+                # Delete key for entry points
+                elif event.key == pygame.K_DELETE:
+                    if self.selected_entry_point is not None:
+                        self.save_undo()
+                        self.room.remove_entry_point(self.selected_entry_point)
+                        self.selected_entry_point = None
+                        self.show_message("Entry point deleted")
                 
                 # Escape key - cancel tool or exit
                 elif event.key == pygame.K_ESCAPE:
                     if self.line_start:
                         self.line_start = None
+                    elif self.selected_entry_point is not None:
+                        self.selected_entry_point = None
                     elif self.file_dialog.active:
                         self.file_dialog.close()
+                    elif self.entry_editor and self.entry_editor.active:
+                        self.entry_editor.close()
                     else:
                         self.exit_editor()
             
@@ -1041,9 +1478,16 @@ class RoomEditor:
     
     def update(self, dt):
         """Update editor state."""
+        mouse_pos = pygame.mouse.get_pos()
+        
         self.width_input.update(dt)
         self.height_input.update(dt)
         self.file_dialog.update(dt)
+        
+        if self.entry_editor:
+            self.entry_editor.update(dt, mouse_pos)
+            if not self.entry_editor.active:
+                self.entry_editor = None
         
         if self.message_timer > 0:
             self.message_timer -= dt
@@ -1060,6 +1504,10 @@ class RoomEditor:
         
         # Draw file dialog
         self.file_dialog.draw(self.screen, self.font)
+        
+        # Draw entry editor
+        if self.entry_editor:
+            self.entry_editor.draw(self.screen, self.font)
         
         # Draw message
         if self.message_timer > 0:
@@ -1126,13 +1574,31 @@ class RoomEditor:
                                (min(self.screen.get_width(),
                                    self.room.width * tile_size_zoomed + self.camera_x + self.panel_width), screen_y))
         
-        # Draw spawn point
-        spawn_screen_x, spawn_screen_y = self.tile_to_screen(self.room.spawn_x, self.room.spawn_y)
-        spawn_rect = pygame.Rect(spawn_screen_x + tile_size_zoomed * 0.2,
-                                spawn_screen_y + tile_size_zoomed * 0.2,
-                                tile_size_zoomed * 0.6, tile_size_zoomed * 0.6)
-        pygame.draw.rect(self.screen, COLOR_SPAWN, spawn_rect)
-        pygame.draw.rect(self.screen, (200, 180, 50), spawn_rect, 2)
+        # Draw entry points
+        for i, (x, y, from_room) in enumerate(self.room.entry_points):
+            screen_x, screen_y = self.tile_to_screen(x, y)
+            entry_rect = pygame.Rect(screen_x + tile_size_zoomed * 0.1,
+                                   screen_y + tile_size_zoomed * 0.1,
+                                   tile_size_zoomed * 0.8, tile_size_zoomed * 0.8)
+            
+            # Highlight selected entry point
+            if i == self.selected_entry_point:
+                pygame.draw.rect(self.screen, (255, 255, 100), entry_rect)
+                pygame.draw.rect(self.screen, (255, 220, 50), entry_rect, 3)
+            else:
+                pygame.draw.rect(self.screen, (100, 200, 255), entry_rect)
+                pygame.draw.rect(self.screen, (150, 220, 255), entry_rect, 2)
+            
+            # Label with room name if zoom allows
+            if self.zoom >= 0.8:
+                label = from_room[:6]  # Truncate long names
+                label_surf = self.font.render(label, True, (255, 255, 255))
+                label_rect = label_surf.get_rect(centerx=screen_x + tile_size_zoomed/2,
+                                                top=screen_y + tile_size_zoomed + 2)
+                # Background for readability
+                bg_rect = label_rect.inflate(4, 2)
+                pygame.draw.rect(self.screen, (0, 0, 0, 128), bg_rect)
+                self.screen.blit(label_surf, label_rect)
         
         # Draw line/rect preview
         if self.line_start:

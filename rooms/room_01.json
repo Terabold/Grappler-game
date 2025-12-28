@@ -158,7 +158,7 @@
         0,
         0,
         0,
-        0,
+        1,
         0,
         1,
         0,
@@ -633,8 +633,8 @@
         1,
         1,
         1,
-        1,
-        1
+        0,
+        0
       ]
     },
     {
@@ -642,10 +642,24 @@
       "type": "objectgroup",
       "objects": [
         {
-          "name": "spawn",
-          "type": "spawn",
+          "name": "entry",
+          "type": "entry",
           "x": 112,
-          "y": 240
+          "y": 240,
+          "properties": {
+            "from_room": "start",
+            "is_start": true
+          }
+        },
+        {
+          "name": "entry",
+          "type": "entry",
+          "x": 752,
+          "y": 176,
+          "properties": {
+            "from_room": "room_02",
+            "is_start": false
+          }
         }
       ]
     }

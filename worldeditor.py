@@ -381,7 +381,7 @@ class FileList:
 # ============================================================================
 
 class WorldEditor:
-    def __init__(self, game=None, rooms_dir="rooms"):
+    def __init__(self, rooms_dir="rooms", game=None):
         if game:
             self.game = game
             self.screen = game.screen
@@ -417,6 +417,10 @@ class WorldEditor:
         self.dragging_room = False
         self.drag_offset = (0, 0)
         self.room_to_edit = None
+        
+        # Double-click detection
+        self.last_click_time = 0
+        self.last_click_room = None
         
         # UI
         self.panel_width = 240  # Increased from 220
@@ -534,8 +538,19 @@ class WorldEditor:
     
     def open_room_editor(self):
         import subprocess
-        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "room_editor.py")
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "roomeditor.py")
         subprocess.Popen([sys.executable, script, self.rooms_dir])
+    
+    def open_room_editor_for_room(self, room):
+        from roomeditor import RoomEditor
+        editor = RoomEditor(rooms_dir=self.rooms_dir, game=self)
+        editor.room.load(room.filename)
+        editor.width_input.set_value(editor.room.width)
+        editor.height_input.set_value(editor.room.height)
+        editor.center_view()
+        editor.run()
+        # After editing, reload the room in world editor
+        room.reload()
     
     def center_view(self):
         if not self.world.rooms:
@@ -590,10 +605,17 @@ class WorldEditor:
                     if event.button == 1:
                         room = self.get_room_at(*event.pos)
                         if room:
-                            self.selected_room = room
-                            self.dragging_room = True
-                            wx, wy = self.screen_to_world(*event.pos)
-                            self.drag_offset = (wx - room.x, wy - room.y)
+                            current_time = pygame.time.get_ticks()
+                            if self.last_click_room == room and current_time - self.last_click_time < 400:
+                                # Double click - open room editor
+                                self.open_room_editor_for_room(room)
+                            else:
+                                self.selected_room = room
+                                self.dragging_room = True
+                                wx, wy = self.screen_to_world(*event.pos)
+                                self.drag_offset = (wx - room.x, wy - room.y)
+                            self.last_click_time = current_time
+                            self.last_click_room = room
                         else:
                             self.selected_room = None
                     
