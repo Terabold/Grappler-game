@@ -1,5 +1,6 @@
 import pygame
 import os
+import sys
 from settings.settings_manager import SettingsManager
 from menus.main_menu import MainMenu
 from menus.pause_menu import PauseMenu
@@ -61,6 +62,13 @@ class Game:
         pygame.display.set_caption("Grapple")
         self.main_menu = MainMenu(self)
         self.pause_menu = PauseMenu(self)
+        
+        # Recreate camera if game is running to use new screen dimensions
+        if self.camera and self.room_manager:
+            self.camera = Camera(self.width, self.height)
+            self.room_manager.set_camera(self.camera)
+            if self.room_manager.current_room:
+                self.camera.set_bounds(self.room_manager.current_room.bounds)
 
     def create_main_menu(self):
         return MainMenu(self)
@@ -81,6 +89,12 @@ class Game:
     def start_world_editor(self):
         self.world_editor = WorldEditor(game=self)
         self.state = "world_editor"
+    
+    def start_editor(self):
+        """Launch room editor in a subprocess."""
+        import subprocess
+        editor_path = os.path.join(os.path.dirname(__file__), "roomeditor.py")
+        subprocess.Popen([sys.executable, editor_path])
     
     def start_game(self):
         self.camera = Camera(self.width, self.height)
@@ -232,14 +246,12 @@ class Game:
                 self.player.start_transition(direction)
                 self.room_manager.transition_to(target_room_id, direction, self._on_room_transition_complete)
         
-        # Room transition (fallback for bounds-based transitions)
+        # Room transition - always keep momentum
         transition = self.room_manager.check_room_transition(self.player.rect)
         if transition and not self.camera.transitioning:
             room_id, direction = transition
-            self.previous_room_id = self.room_manager.current_room.room_id
-            self.current_transition_direction = direction
-            self.player.start_transition(direction)
-            self.room_manager.transition_to(room_id, direction, self._on_room_transition_complete)
+            self.player.start_transition(direction, keep_momentum=True)
+            self.room_manager.transition_to(room_id, direction, self.player, self.player.end_transition)
         
         cx, cy = self.player.center
         self.camera.follow(cx, cy, dt)
@@ -258,9 +270,8 @@ class Game:
         self.player.end_transition()
     
     def _respawn_player(self):
-        """Respawn player at spawn point."""
-        spawn = self.room_manager.spawn
-        self.player = Player(spawn[0], spawn[1])
+        """Respawn player using room manager logic."""
+        self.room_manager.respawn_player(self.player)
     
     def draw_game(self):
         self.screen.fill((15, 15, 25))
@@ -281,31 +292,13 @@ class Game:
         self._draw_controls()
     
     def _draw_hud(self):
-        """Draw health bar and other UI."""
-        # Health bar
-        bar_x = 20
-        bar_y = 20
-        bar_width = 150
-        bar_height = 16
-        
-        # Background
-        pygame.draw.rect(self.screen, (40, 40, 40), (bar_x - 2, bar_y - 2, bar_width + 4, bar_height + 4))
-        pygame.draw.rect(self.screen, (60, 20, 20), (bar_x, bar_y, bar_width, bar_height))
-        
-        # Health
-        health_ratio = self.player.health / self.player.max_health
-        health_width = int(bar_width * health_ratio)
-        health_color = (60, 200, 80) if health_ratio > 0.5 else (200, 180, 50) if health_ratio > 0.25 else (200, 60, 60)
-        pygame.draw.rect(self.screen, health_color, (bar_x, bar_y, health_width, bar_height))
-        
-        # Border
-        pygame.draw.rect(self.screen, (100, 100, 100), (bar_x - 2, bar_y - 2, bar_width + 4, bar_height + 4), 2)
-        
-        # Health text
-        font = pygame.font.Font(None, 20)
-        health_text = f"{self.player.health}/{self.player.max_health}"
-        text_surf = font.render(health_text, True, (255, 255, 255))
-        self.screen.blit(text_surf, (bar_x + bar_width + 8, bar_y))
+        """Draw UI."""
+        # Exit indicator (if you have exit tiles)
+        if hasattr(self.player, 'on_exit') and self.player.on_exit:
+            exit_font = pygame.font.Font(None, 36)
+            exit_text = exit_font.render("EXIT - Press E to continue", True, (100, 255, 100))
+            text_rect = exit_text.get_rect(center=(self.width // 2, 50))
+            self.screen.blit(exit_text, text_rect)
     
     def _draw_aim_indicator(self):
         """Draw subtle aim dots."""

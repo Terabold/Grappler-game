@@ -167,50 +167,72 @@ class GrappleHook:
                 self._update_swing(dt, player, room_manager)
     
     def _update_firing(self, dt, player, room_manager):
-        """Update hook while traveling."""
-        move = GRAPPLE_FIRE_SPEED * dt
-        self.hook_x += self.fire_dir_x * move
-        self.hook_y += self.fire_dir_y * move
-        self.fire_distance += move
+        """Update hook while traveling with raycast collision to prevent tunneling."""
+        total_move = GRAPPLE_FIRE_SPEED * dt
         
-        # Check for hit - grapple attaches to solid surfaces
-        hook_rect = pygame.Rect(int(self.hook_x) - 3, int(self.hook_y) - 3, 6, 6)
-        collisions = room_manager.get_collisions(hook_rect)
+        # Step size (smaller than a tile to catch edges)
+        step_size = 4.0
         
-        # Attach to solid and grapple tiles (not spikes, exits, or empty)
-        valid_hit = False
-        for tile in collisions:
-            # tile_type: 1=solid, 3=grapple, 5=platform - all can be grappled
-            if tile.tile_type in (1, 3, 5):
-                valid_hit = True
-                break
+        distance_left = total_move
+        current_x = self.hook_x
+        current_y = self.hook_y
         
-        if valid_hit:
-            self.state = "attached"
-            self.anchor_x = self.hook_x
-            self.anchor_y = self.hook_y
+        while distance_left > 0:
+            step = min(distance_left, step_size)
             
-            px, py = player.center
-            self.rope_length = distance(px, py, self.anchor_x, self.anchor_y)
+            # Advance potential position
+            current_x += self.fire_dir_x * step
+            current_y += self.fire_dir_y * step
+            self.fire_distance += step
             
-            dx = px - self.anchor_x
-            dy = py - self.anchor_y
-            self.angle = math.atan2(dx, dy)
+            # Check for hit at this step
+            hook_rect = pygame.Rect(int(current_x) - 3, int(current_y) - 3, 6, 6)
+            collisions = room_manager.get_collisions(hook_rect)
             
-            # Convert velocity to angular
-            if self.rope_length > 10:
-                tangent_x = math.cos(self.angle)
-                tangent_y = -math.sin(self.angle)
-                tangent_vel = player.vx * tangent_x + player.vy * tangent_y
-                self.angular_velocity = tangent_vel / self.rope_length
-            else:
-                self.angular_velocity = 0.0
+            valid_hit = False
+            for tile in collisions:
+                # tile_type: 1=solid, 3=grapple, 5=platform
+                if tile.tile_type in (1, 3, 5):
+                    valid_hit = True
+                    break
             
-            self._pull_vx = player.vx
-            self._pull_vy = player.vy
-        
-        elif self.fire_distance > GRAPPLE_MAX_RANGE:
-            self.state = "inactive"
+            if valid_hit:
+                # We hit something!
+                self.state = "attached"
+                self.hook_x = current_x
+                self.hook_y = current_y
+                self.anchor_x = self.hook_x
+                self.anchor_y = self.hook_y
+                
+                px, py = player.center
+                self.rope_length = distance(px, py, self.anchor_x, self.anchor_y)
+                
+                dx = px - self.anchor_x
+                dy = py - self.anchor_y
+                self.angle = math.atan2(dx, dy)
+                
+                # Convert velocity to angular
+                if self.rope_length > 10:
+                    tangent_x = math.cos(self.angle)
+                    tangent_y = -math.sin(self.angle)
+                    tangent_vel = player.vx * tangent_x + player.vy * tangent_y
+                    self.angular_velocity = tangent_vel / self.rope_length
+                else:
+                    self.angular_velocity = 0.0
+                
+                self._pull_vx = player.vx
+                self._pull_vy = player.vy
+                return # Stop processing steps
+                
+            # If no hit, confirm this step and continue
+            self.hook_x = current_x
+            self.hook_y = current_y
+            distance_left -= step
+            
+            # Max range check
+            if self.fire_distance > GRAPPLE_MAX_RANGE:
+                self.state = "inactive"
+                return
     
     def _update_pull(self, dt, player, room_manager):
         """Pull player toward anchor."""

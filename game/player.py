@@ -76,11 +76,6 @@ class Player:
         self.transition_slid = 0.0
         self.transition_slide = 200  # Increased to move player further during transition
         
-        # Combat
-        self.health = 100
-        self.max_health = 100
-        self.invincible_timer = 0.0
-        
         # Flags for game state
         self.on_exit = False  # True when touching exit tile
         self.exit_direction = None  # Direction of exit being touched
@@ -94,21 +89,23 @@ class Player:
     def center(self):
         return (self.x + self.width / 2, self.y + self.height / 2)
     
-    @property
-    def is_invincible(self):
-        """True if player can't be hurt (rolling or i-frames)"""
-        return self.invincible_timer > 0 or (self.rolling and self.roll_timer < ROLL_IFRAMES)
+
     
     # =========================================================================
     # TRANSITIONS
     # =========================================================================
     
-    def start_transition(self, direction):
+    def start_transition(self, direction, keep_momentum=False):
         self.frozen = True
         self.transition_slid = 0.0
         self.grapple.cancel()
-        self.vx = 0.0
-        self.vy = 0.0
+        
+        # Only zero velocity if teleporting (forward progression)
+        # Keep velocity for natural backward movement
+        if not keep_momentum:
+            self.vx = 0.0
+            self.vy = 0.0
+        
         self.rolling = False
         
         dirs = {"right": (1, 0), "left": (-1, 0), "down": (0, 1), "up": (0, -1)}
@@ -143,7 +140,7 @@ class Player:
             world_mouse = mouse_pos
         
         # Update timers
-        self.invincible_timer = max(0.0, self.invincible_timer - dt)
+
         self.wall_jump_lock_timer = max(0.0, self.wall_jump_lock_timer - dt)
         self.roll_cooldown = max(0.0, self.roll_cooldown - dt)
         
@@ -578,9 +575,8 @@ class Player:
         
         for tile in room_manager.get_collisions(self.rect):
             if tile.tile_type == TILE_SPIKE:
-                # Spikes deal damage
-                if not self.is_invincible:
-                    self.take_damage(25, 0, -300)
+                # Spikes - instant death
+                self.dead = True
             elif tile.tile_type == TILE_EXIT:
                 # Determine exit direction based on position in room
                 room = room_manager.current_room
@@ -600,33 +596,6 @@ class Player:
                     
                     if self.exit_direction:
                         self.on_exit = True
-    
-    # =========================================================================
-    # COMBAT
-    # =========================================================================
-    
-    def take_damage(self, amount, knockback_x=0, knockback_y=0):
-        """Take damage if not invincible."""
-        if self.is_invincible:
-            return False
-        
-        self.health -= amount
-        self.invincible_timer = 1.0
-        
-        # Check for death
-        if self.health <= 0:
-            self.dead = True
-            self.health = 0
-        
-        # Apply knockback
-        self.vx = knockback_x
-        self.vy = knockback_y - 200
-        
-        # Cancel roll and grapple
-        self.rolling = False
-        self.grapple.cancel()
-        
-        return True
     
     # =========================================================================
     # DRAW
@@ -650,11 +619,6 @@ class Player:
             color = (150, 255, 150)  # Brighter green when sprinting
         else:
             color = (100, 220, 120)
-        
-        # Flash when invincible (from damage, not roll)
-        if self.invincible_timer > 0 and not self.rolling:
-            if int(self.invincible_timer * 10) % 2 == 0:
-                color = (255, 255, 255)
         
         # Draw player
         screen_rect = camera.apply_rect(self.rect)

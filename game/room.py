@@ -49,8 +49,8 @@ class Room:
         # Pixel bounds in world space
         self.bounds = None
         
-        # Entry points keyed by source room ID
-        self.entry_points = {}  # room_id -> (x, y)
+        # Spawn point (local to room)
+        self.spawn = None
         
         self._load(filepath)
     
@@ -107,25 +107,14 @@ class Room:
                         self.tiles[y][x] = TILE_SOLID
     
     def _parse_objects(self, layer):
-        """Parse object layer for spawn points and entry points."""
+        """Parse object layer for spawn point only."""
         for obj in layer.get('objects', []):
             obj_type = obj.get('type', '').lower()
             obj_name = obj.get('name', '').lower()
             
+            # Only look for spawn points
             if 'spawn' in obj_type or 'spawn' in obj_name:
                 self.spawn = (obj.get('x', 64), obj.get('y', 64))
-            elif obj_type == 'entry' or obj_name == 'entry':
-                # Entry point with from_room property
-                from_room = obj.get('properties', {}).get('from_room') or obj.get('from_room')
-                if from_room:
-                    self.entry_points[from_room] = (obj.get('x', 64), obj.get('y', 64))
-            # Legacy support for direction-based entries
-            elif obj_type in ['left_entry', 'right_entry', 'up_entry', 'down_entry']:
-                direction = obj_type.replace('_entry', '')
-                self.entry_points[direction] = (obj.get('x', 64), obj.get('y', 64))
-            elif obj_name in ['left_entry', 'right_entry', 'up_entry', 'down_entry']:
-                direction = obj_name.replace('_entry', '')
-                self.entry_points[direction] = (obj.get('x', 64), obj.get('y', 64))
     
     def get_spawn_world(self):
         """Get spawn point in world coordinates."""
@@ -133,13 +122,6 @@ class Room:
             return (self.world_x + self.spawn[0], self.world_y + self.spawn[1])
         return (self.world_x + 64, self.world_y + 64)
     
-    def get_entry_world(self, from_room_id):
-        """Get entry point in world coordinates for a specific source room."""
-        entry = self.entry_points.get(from_room_id)
-        if entry:
-            return (self.world_x + entry[0], self.world_y + entry[1])
-        # Fallback to spawn if no entry point for this room
-        return self.get_spawn_world()
     
     def contains_point(self, x, y):
         """Check if world point is inside this room."""
@@ -205,32 +187,38 @@ class Room:
         return results
     
     def draw(self, surface, camera):
-        """Draw visible tiles."""
-        view_rect = pygame.Rect(camera.x, camera.y, camera.view_width, camera.view_height)
-        if not view_rect.colliderect(self.bounds):
-            return
+        """Draw visible tiles (Optimized viewport culling)."""
+        # 1. Viewport Culling: Only draw tiles strictly inside the camera view
+        # Convert camera top-left to tile coordinates
+        start_col = int(max(0, (camera.x - self.world_x) // self.tile_size))
+        start_row = int(max(0, (camera.y - self.world_y) // self.tile_size))
         
-        for y in range(self.height):
-            for x in range(self.width):
+        # Convert camera bottom-right to tile coordinates
+        # We add 1 or 2 extra tiles to be safe against rounding/partial tiles
+        end_col = int(min(self.width, (camera.x + camera.view_width - self.world_x) // self.tile_size + 1))
+        end_row = int(min(self.height, (camera.y + camera.view_height - self.world_y) // self.tile_size + 1))
+        
+        for y in range(start_row, end_row):
+            for x in range(start_col, end_col):
                 tile_type = self.tiles[y][x]
                 if tile_type == TILE_EMPTY:
                     continue
                 
-                world_rect = pygame.Rect(
-                    self.world_x + x * self.tile_size,
-                    self.world_y + y * self.tile_size,
-                    self.tile_size,
-                    self.tile_size
-                )
+                # World position of this tile
+                world_x = self.world_x + x * self.tile_size
+                world_y = self.world_y + y * self.tile_size
                 
-                screen_rect = camera.apply_rect(world_rect)
+                # Screen position
+                screen_rect = camera.apply_rect(pygame.Rect(world_x, world_y, self.tile_size, self.tile_size))
+                
                 color = TILE_COLORS.get(tile_type, (100, 100, 100))
                 
                 if color:
                     pygame.draw.rect(surface, color, screen_rect)
                     
                     if tile_type == TILE_PLATFORM:
-                        top_line = pygame.Rect(screen_rect.x, screen_rect.y, screen_rect.width, 4)
+                        # Draw platform top detail
+                        top_line = pygame.Rect(screen_rect.x, screen_rect.y, screen_rect.width, max(1, int(4 * camera.scale_y)))
                         pygame.draw.rect(surface, (120, 100, 70), top_line)
 
 
@@ -248,6 +236,7 @@ class RoomManager:
         self.current_room = None
         self.camera = None
         self.spawn = (100, 100)
+        self.respawn_data = None  # {room_id, x, y, facing_right}
     
     def set_camera(self, camera):
         self.camera = camera
@@ -285,23 +274,48 @@ class RoomManager:
                 room = Room(room_id, room_path, world_x, world_y)
                 self.rooms[room_id] = room
                 
-                if room_id == start_room_id and room.spawn:
-                    self.spawn = room.get_spawn_world()
+                if room_id == start_room_id:
+                    if room.spawn:
+                        self.spawn = room.get_spawn_world()
+                    else:
+                        self.spawn = (room.world_x + 64, room.world_y + 64)
+                    
+                    # Set initial respawn data
+                    self.respawn_data = {
+                        'room_id': room_id,
+                        'x': self.spawn[0],
+                        'y': self.spawn[1],
+                        'facing_right': True
+                    }
         
         if start_room_id in self.rooms:
             self.current_room = self.rooms[start_room_id]
             if self.camera:
                 self.camera.set_bounds(self.current_room.bounds)
+        
+        # Debug: Print room positions
+        print("\n=== ROOM LAYOUT ===")
+        for room_id, room in self.rooms.items():
+            print(f"{room_id}: bounds={room.bounds}, spawn={room.spawn}")
     
     def load_chapter(self, chapter_file):
         """Load chapter - just calls load_world."""
         self.load_world(chapter_file)
     
     def get_collisions(self, rect):
-        """Get collisions from current room only."""
+        """Get collisions from current room and adjacent rooms (for cross-room grappling)."""
+        collisions = []
+        
+        # Current room
         if self.current_room:
-            return self.current_room.get_collisions(rect)
-        return []
+            collisions.extend(self.current_room.get_collisions(rect))
+        
+        # Adjacent rooms (for grappling across room boundaries)
+        for room in self.rooms.values():
+            if room != self.current_room and room.bounds.inflate(64, 64).colliderect(rect):
+                collisions.extend(room.get_collisions(rect))
+        
+        return collisions
     
     def get_solid_collisions(self, rect):
         """Get solid collisions from current room only."""
@@ -314,41 +328,102 @@ class RoomManager:
         if not self.current_room:
             return None
         
-        cx, cy = player_rect.centerx, player_rect.centery
-        
-        if self.current_room.contains_point(cx, cy):
-            return None
+        # Check if we have effectively left the current room or entered another
+        # Use a slightly expanded rect to catch edge touches
+        check_rect = player_rect.inflate(4, 4)
         
         for room_id, room in self.rooms.items():
             if room == self.current_room:
                 continue
             
-            if room.contains_point(cx, cy):
-                old_bounds = self.current_room.bounds
-                new_bounds = room.bounds
+            # Use intersection check with expanded rect
+            if room.bounds.colliderect(check_rect):
+                # print(f"DETECTED overlap with {room_id}! Player at ({player_rect.x}, {player_rect.y})")
+                clip = room.bounds.clip(check_rect)
                 
-                if new_bounds.left >= old_bounds.right - 10:
-                    direction = "right"
-                elif new_bounds.right <= old_bounds.left + 10:
-                    direction = "left"
-                elif new_bounds.top >= old_bounds.bottom - 10:
-                    direction = "down"
-                else:
-                    direction = "up"
-                
-                return (room_id, direction)
+                # If we overlap at all (even 1 pixel), trigger transition
+                if clip.width > 0 and clip.height > 0:
+                    old_bounds = self.current_room.bounds
+                    new_bounds = room.bounds
+                    
+                    # Determine direction based on relative position
+                    if new_bounds.top >= old_bounds.bottom - 16: # Room is below
+                        direction = "down"
+                    elif new_bounds.bottom <= old_bounds.top + 16: # Room is above
+                        direction = "up"
+                    elif new_bounds.left >= old_bounds.right - 16: # Room is right
+                        direction = "right"
+                    elif new_bounds.right <= old_bounds.left + 16: # Room is left
+                        direction = "left"
+                    else:
+                        # Fallback geometry check
+                        dx = new_bounds.centerx - old_bounds.centerx
+                        dy = new_bounds.centery - old_bounds.centery
+                        if abs(dx) > abs(dy):
+                            direction = "right" if dx > 0 else "left"
+                        else:
+                            direction = "down" if dy > 0 else "up"
+                    
+                    print(f"  Direction: {direction}")        
+                    return (room_id, direction)
         
         return None
     
-    def transition_to(self, room_id, direction, callback=None):
-        """Transition camera to new room."""
+    def transition_to(self, room_id, direction, player, callback=None):
+        """Transition to new room - always teleport to spawn, keep momentum."""
         if room_id not in self.rooms:
+            print(f"ERROR: Room {room_id} not found!")
             return
         
         new_room = self.rooms[room_id]
+        print(f"TRANSITION: {self.current_room.room_id if self.current_room else '?'} -> {new_room.room_id} (direction: {direction})")
         
+        # Determine forward progress (Lexicographical check: room_02 > room_01)
+        # Capture this BEFORE on_complete updates self.current_room
+        is_forward = False
+        if self.current_room:
+            is_forward = new_room.room_id > self.current_room.room_id
+
         def on_complete():
             self.current_room = new_room
+            
+            # Hybrid Transition Logic
+            # Forward (Level Up): Teleport to Spawn
+            # Backward (Previous): Natural Movement
+            
+            if is_forward and new_room.spawn:
+                 spawn_pos = new_room.get_spawn_world()
+                 print(f"DEBUG: Forward transition to {new_room.room_id} -> Teleporting to spawn {spawn_pos}")
+                 player.x = spawn_pos[0]
+                 player.y = spawn_pos[1]
+            else:
+                 # Natural transition - place player just inside new room
+                 if direction == "right":
+                     player.x = new_room.bounds.left + 4
+                 elif direction == "left":
+                     player.x = new_room.bounds.right - player.width - 4
+                 elif direction == "down":
+                     player.y = new_room.bounds.top + 4
+                 elif direction == "up":
+                     player.y = new_room.bounds.bottom - player.height - 4
+            
+            # Update checkpoint (so death respawns at the proper spawn point)
+            if new_room.spawn:
+                spawn_pos = new_room.get_spawn_world()
+                self.respawn_data = {
+                    'room_id': room_id,
+                    'x': spawn_pos[0],
+                    'y': spawn_pos[1]
+                }
+
+            else:
+                self.respawn_data = {
+                    'room_id': room_id,
+                    'x': player.x,
+                    'y': player.y,
+                    'facing_right': player.facing_right
+                }
+            
             if callback:
                 callback()
         
@@ -356,8 +431,38 @@ class RoomManager:
             self.camera.start_transition(new_room.bounds, direction, on_complete)
         else:
             self.current_room = new_room
-            if callback:
-                callback()
+            on_complete()
+    
+    
+    def respawn_player(self, player):
+        """Respawn player at the last saved checkpoint/entry."""
+        if not self.respawn_data or self.respawn_data['room_id'] not in self.rooms:
+            # Fallback to level start
+            player.x, player.y = self.spawn
+            player.dead = False
+            # Find which room spawn is in
+            for room in self.rooms.values():
+                if room.contains_point(player.x, player.y):
+                    self.current_room = room
+                    if self.camera:
+                        self.camera.set_bounds(room.bounds)
+                    break
+            return
+
+        # Restore from respawn data
+        room_id = self.respawn_data['room_id']
+        room = self.rooms[room_id]
+        
+        self.current_room = room
+        if self.camera:
+            self.camera.set_bounds(room.bounds)
+            
+        player.x = self.respawn_data['x']
+        player.y = self.respawn_data['y']
+        player.facing_right = self.respawn_data.get('facing_right', True)
+        player.vx = 0
+        player.vy = 0
+        player.dead = False
     
     def draw(self, surface, camera):
         """Draw all visible rooms."""

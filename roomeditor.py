@@ -67,10 +67,8 @@ class RoomData:
         self.width = width
         self.height = height
         self.tiles = [[TILE_EMPTY] * width for _ in range(height)]
-        # Entry points: list of (x, y, from_room)
-        self.entry_points = []
-        # Index of entry point that serves as start/respawn point (None if none set)
-        self.start_entry_index = None
+        # Single spawn point: (x, y) in tile coordinates
+        self.spawn = None  # Set to (x, y) when placed
         self.modified = False
         self.filename = None
     
@@ -86,18 +84,11 @@ class RoomData:
         self.width = new_width
         self.height = new_height
         
-        # Keep entry points in bounds
-        new_entry_points = []
-        for i, (x, y, from_room) in enumerate(self.entry_points):
-            new_x = min(x, new_width - 1)
-            new_y = min(y, new_height - 1)
-            new_entry_points.append((new_x, new_y, from_room))
-        
-        self.entry_points = new_entry_points
-        
-        # Update start entry index if it's still valid
-        if self.start_entry_index is not None and self.start_entry_index >= len(self.entry_points):
-            self.start_entry_index = None
+        # Keep spawn in bounds
+        if self.spawn:
+            x, y = self.spawn
+            if x >= new_width or y >= new_height:
+                self.spawn = None  # Remove spawn if out of bounds
             
         self.modified = True
     
@@ -113,8 +104,7 @@ class RoomData:
     def set_spawn(self, x, y):
         """Set spawn point."""
         if 0 <= x < self.width and 0 <= y < self.height:
-            self.spawn_x = x
-            self.spawn_y = y
+            self.spawn = (x, y)
             self.modified = True
     
     def get_tile(self, x, y):
@@ -123,31 +113,13 @@ class RoomData:
             return self.tiles[y][x]
         return TILE_EMPTY
     
-    def add_entry_point(self, x, y, from_room="start"):
-        """Add an entry point."""
-        self.entry_points.append((x, y, from_room))
-        self.modified = True
+    def get_spawn(self):
+        """Get spawn point."""
+        return self.spawn
     
-    def remove_entry_point(self, index):
-        """Remove an entry point."""
-        if 0 <= index < len(self.entry_points):
-            self.entry_points.pop(index)
-            self.modified = True
-    
-    def set_entry_point_room(self, index, from_room):
-        """Set the from_room for an entry point."""
-        if 0 <= index < len(self.entry_points):
-            x, y, _ = self.entry_points[index]
-            self.entry_points[index] = (x, y, from_room)
-            self.modified = True
-    
-    def set_entry_point_start(self, index, is_start):
-        """Set whether an entry point is the start point."""
-        if is_start:
-            # Only one start point allowed - clear any existing
-            self.start_entry_index = index
-        elif self.start_entry_index == index:
-            self.start_entry_index = None
+    def clear_spawn(self):
+        """Clear spawn point."""
+        self.spawn = None
         self.modified = True
     
     def fill_borders(self):
@@ -190,16 +162,12 @@ class RoomData:
                     "type": "objectgroup",
                     "objects": [
                         {
-                            "name": "entry",
-                            "type": "entry",
-                            "x": x * TILE_SIZE + TILE_SIZE // 2,
-                            "y": y * TILE_SIZE + TILE_SIZE // 2,
-                            "properties": {
-                                "from_room": from_room,
-                                "is_start": i == self.start_entry_index
-                            }
-                        } for i, (x, y, from_room) in enumerate(self.entry_points)
-                    ]
+                            "name": "spawn",
+                            "type": "spawn",
+                            "x": self.spawn[0] * TILE_SIZE,
+                            "y": self.spawn[1] * TILE_SIZE
+                        }
+                    ] if self.spawn else []
                 }
             ]
         }
@@ -221,17 +189,14 @@ class RoomData:
             
             elif layer.get("type") == "objectgroup":
                 for obj in layer.get("objects", []):
-                    if obj.get("type") == "entry" or obj.get("name") == "entry":
+                    obj_type = obj.get("type", "").lower()
+                    obj_name = obj.get("name", "").lower()
+                    
+                    # Load spawn point
+                    if "spawn" in obj_type or "spawn" in obj_name:
                         x = int(obj.get("x", 64) // TILE_SIZE)
                         y = int(obj.get("y", 64) // TILE_SIZE)
-                        from_room = obj.get("properties", {}).get("from_room") or obj.get("from_room", "start")
-                        is_start = obj.get("properties", {}).get("is_start", False)
-                        
-                        self.entry_points.append((x, y, from_room))
-                        
-                        # Set start entry index
-                        if is_start:
-                            self.start_entry_index = len(self.entry_points) - 1
+                        self.spawn = (x, y)
         
         self.modified = False
     
@@ -895,14 +860,6 @@ class RoomEditor:
         self.panel_width = 200
         self.setup_ui()
         
-        # Entry point editor
-        self.entry_editor = None  # Will be EntryPointEditor instance
-        self.selected_entry_point = None  # Index of selected entry point
-        
-        # Double-click detection for entry points
-        self._last_entry_click = 0
-        self._last_entry_index = None
-        
         # File dialog
         self.file_dialog = FileDialog(200, 100, 400, 400, rooms_dir)
         
@@ -938,7 +895,7 @@ class RoomEditor:
         # Tool buttons in a row/compact vertical list
         self.tool_buttons = []
         tools = [("Paint", "paint"), ("Fill", "fill"), ("Line", "line"), 
-                 ("Rect", "rect"), ("Entry", "entry")]
+                 ("Rect", "rect"), ("Spawn", "spawn")]
         
         y = 170
         for i, (name, tool) in enumerate(tools):
@@ -985,8 +942,7 @@ class RoomEditor:
         """Save current state for undo."""
         state = {
             'tiles': [row[:] for row in self.room.tiles],
-            'entry_points': self.room.entry_points[:],
-            'start_entry_index': self.room.start_entry_index
+            'spawn': self.room.spawn
         }
         self.undo_stack.append(state)
         if len(self.undo_stack) > self.max_undo:
@@ -1001,17 +957,14 @@ class RoomEditor:
         # Save current for redo
         current = {
             'tiles': [row[:] for row in self.room.tiles],
-            'spawn_x': self.room.spawn_x,
-            'spawn_y': self.room.spawn_y,
-            'entry_points': self.room.entry_points[:]
+            'spawn': self.room.spawn
         }
         self.redo_stack.append(current)
         
         # Restore previous
         state = self.undo_stack.pop()
         self.room.tiles = state['tiles']
-        self.room.entry_points = state['entry_points']
-        self.room.start_entry_index = state.get('start_entry_index', None)
+        self.room.spawn = state['spawn']
         self.room.modified = True
         self.show_message("Undo")
     
@@ -1023,16 +976,14 @@ class RoomEditor:
         # Save current for undo
         current = {
             'tiles': [row[:] for row in self.room.tiles],
-            'spawn_x': self.room.spawn_x,
-            'spawn_y': self.room.spawn_y,
+            'spawn': self.room.spawn
         }
         self.undo_stack.append(current)
         
         # Restore
         state = self.redo_stack.pop()
         self.room.tiles = state['tiles']
-        self.room.entry_points = state['entry_points']
-        self.room.start_entry_index = state.get('start_entry_index', None)
+        self.room.spawn = state['spawn']
         self.room.modified = True
         self.show_message("Redo")
     
@@ -1208,14 +1159,13 @@ class RoomEditor:
                         self.room.load(result)
                         self.width_input.set_value(self.room.width)
                         self.height_input.set_value(self.room.height)
-                        self.center_view()
                         self.show_message(f"Loaded: {os.path.basename(result)}")
                 continue
             
             # Entry editor
-            if self.entry_editor and self.entry_editor.active:
-                self.entry_editor.handle_event(event)
-                continue
+            # if self.entry_editor and self.entry_editor.active:
+            #     self.entry_editor.handle_event(event)
+            #     continue
             
             # Input boxes
             self.width_input.handle_event(event)
@@ -1228,22 +1178,18 @@ class RoomEditor:
                 if event.button == 3 and event.pos[0] > self.panel_width:
                     tile_x, tile_y = self.screen_to_tile(*event.pos)
                     
-                    # Check if clicking on an entry point
-                    removed_entry = False
-                    for i, (ex, ey, from_room) in enumerate(self.room.entry_points):
-                        if ex == tile_x and ey == tile_y:
+                    # Check if clicking on spawn point
+                    removed_spawn = False
+                    if self.room.spawn:
+                        sx, sy = self.room.spawn
+                        if sx == tile_x and sy == tile_y:
                             self.save_undo()
-                            self.room.remove_entry_point(i)
-                            if self.selected_entry_point == i:
-                                self.selected_entry_point = None
-                            elif self.selected_entry_point and self.selected_entry_point > i:
-                                self.selected_entry_point -= 1
-                            self.show_message("Entry point removed")
-                            removed_entry = True
-                            break
+                            self.room.clear_spawn()
+                            self.show_message("Spawn point removed")
+                            removed_spawn = True
                     
                     # If not an entry point, clear the tile
-                    if not removed_entry and 0 <= tile_x < self.room.width and 0 <= tile_y < self.room.height:
+                    if not removed_spawn and 0 <= tile_x < self.room.width and 0 <= tile_y < self.room.height:
                         if self.room.tiles[tile_y][tile_x] != TILE_EMPTY:
                             self.save_undo()
                             self.room.set_tile(tile_x, tile_y, TILE_EMPTY)
@@ -1253,35 +1199,12 @@ class RoomEditor:
                 elif event.button == 1 and event.pos[0] > self.panel_width:
                     tile_x, tile_y = self.screen_to_tile(*event.pos)
                     
-                    if self.tool == "entry":
-                        # Check if clicking on existing entry point
-                        clicked_existing = False
-                        for i, (ex, ey, from_room) in enumerate(self.room.entry_points):
-                            if ex == tile_x and ey == tile_y:
-                                self.selected_entry_point = i
-                                clicked_existing = True
-                                
-                                # Check for double click
-                                current_time = pygame.time.get_ticks()
-                                if hasattr(self, '_last_entry_click') and hasattr(self, '_last_entry_index'):
-                                    if (current_time - self._last_entry_click < 400 and 
-                                        self._last_entry_index == i):
-                                        # Double click - edit entry point
-                                        is_start = (i == self.room.start_entry_index)
-                                        self.entry_editor = EntryPointEditor(
-                                            event.pos[0], event.pos[1], i, from_room, self.edit_entry_point, self.rooms_dir, is_start
-                                        )
-                                        break
-                                
-                                self._last_entry_click = current_time
-                                self._last_entry_index = i
-                                break
-                        
-                        if not clicked_existing:
+                    if self.tool == "spawn":
+                        # Set spawn point
+                        if 0 <= tile_x < self.room.width and 0 <= tile_y < self.room.height:
                             self.save_undo()
-                            # For now, default to "start" - user can edit later
-                            self.room.add_entry_point(tile_x, tile_y, "start")
-                            self.selected_entry_point = len(self.room.entry_points) - 1
+                            self.room.set_spawn(tile_x, tile_y)
+                            self.show_message("Spawn point set")
                     elif self.tool == "fill":
                         target = self.room.get_tile(tile_x, tile_y)
                         self.save_undo()
@@ -1292,31 +1215,6 @@ class RoomEditor:
                         self.painting = True
                         self.save_undo()
                         self.room.set_tile(tile_x, tile_y, self.current_tile)
-                
-                # Right click to remove
-                elif event.button == 3 and event.pos[0] > self.panel_width:
-                    tile_x, tile_y = self.screen_to_tile(*event.pos)
-                    
-                    # Check if clicking on an entry point
-                    removed_entry = False
-                    for i, (ex, ey, from_room) in enumerate(self.room.entry_points):
-                        if ex == tile_x and ey == tile_y:
-                            self.save_undo()
-                            self.room.remove_entry_point(i)
-                            if self.selected_entry_point == i:
-                                self.selected_entry_point = None
-                            elif self.selected_entry_point and self.selected_entry_point > i:
-                                self.selected_entry_point -= 1
-                            self.show_message("Entry point removed")
-                            removed_entry = True
-                            break
-                    
-                    # If not an entry point, clear the tile
-                    if not removed_entry and 0 <= tile_x < self.room.width and 0 <= tile_y < self.room.height:
-                        if self.room.tiles[tile_y][tile_x] != TILE_EMPTY:
-                            self.save_undo()
-                            self.room.set_tile(tile_x, tile_y, TILE_EMPTY)
-                            self.show_message("Tile cleared")
                 
                 # Scroll to zoom
                 elif event.button == 4:  # Scroll up
@@ -1427,22 +1325,23 @@ class RoomEditor:
                 
                 # Delete key for entry points
                 elif event.key == pygame.K_DELETE:
-                    if self.selected_entry_point is not None:
-                        self.save_undo()
-                        self.room.remove_entry_point(self.selected_entry_point)
-                        self.selected_entry_point = None
-                        self.show_message("Entry point deleted")
+                    # if self.selected_entry_point is not None:
+                    #     self.save_undo()
+                    #     self.room.remove_entry_point(self.selected_entry_point)
+                    #     self.selected_entry_point = None
+                    #     self.show_message("Entry point deleted")
+                    pass
                 
                 # Escape key - cancel tool or exit
                 elif event.key == pygame.K_ESCAPE:
                     if self.line_start:
                         self.line_start = None
-                    elif self.selected_entry_point is not None:
-                        self.selected_entry_point = None
+                    # elif self.selected_entry_point is not None:
+                    #     self.selected_entry_point = None
                     elif self.file_dialog.active:
                         self.file_dialog.close()
-                    elif self.entry_editor and self.entry_editor.active:
-                        self.entry_editor.close()
+                    # elif self.entry_editor and self.entry_editor.active:
+                    #     self.entry_editor.close()
                     else:
                         self.exit_editor()
             
@@ -1484,10 +1383,10 @@ class RoomEditor:
         self.height_input.update(dt)
         self.file_dialog.update(dt)
         
-        if self.entry_editor:
-            self.entry_editor.update(dt, mouse_pos)
-            if not self.entry_editor.active:
-                self.entry_editor = None
+        # if self.entry_editor:
+        #     self.entry_editor.update(dt, mouse_pos)
+        #     if not self.entry_editor.active:
+        #         self.entry_editor = None
         
         if self.message_timer > 0:
             self.message_timer -= dt
@@ -1506,8 +1405,8 @@ class RoomEditor:
         self.file_dialog.draw(self.screen, self.font)
         
         # Draw entry editor
-        if self.entry_editor:
-            self.entry_editor.draw(self.screen, self.font)
+        # if self.entry_editor:
+        #     self.entry_editor.draw(self.screen, self.font)
         
         # Draw message
         if self.message_timer > 0:
@@ -1574,30 +1473,22 @@ class RoomEditor:
                                (min(self.screen.get_width(),
                                    self.room.width * tile_size_zoomed + self.camera_x + self.panel_width), screen_y))
         
-        # Draw entry points
-        for i, (x, y, from_room) in enumerate(self.room.entry_points):
+        # Draw spawn point
+        if self.room.spawn:
+            x, y = self.room.spawn
             screen_x, screen_y = self.tile_to_screen(x, y)
-            entry_rect = pygame.Rect(screen_x + tile_size_zoomed * 0.1,
-                                   screen_y + tile_size_zoomed * 0.1,
-                                   tile_size_zoomed * 0.8, tile_size_zoomed * 0.8)
+            spawn_rect = pygame.Rect(screen_x + tile_size_zoomed * 0.2,
+                                   screen_y + tile_size_zoomed * 0.2,
+                                   tile_size_zoomed * 0.6, tile_size_zoomed * 0.6)
             
-            # Highlight selected entry point
-            if i == self.selected_entry_point:
-                pygame.draw.rect(self.screen, (255, 255, 100), entry_rect)
-                pygame.draw.rect(self.screen, (255, 220, 50), entry_rect, 3)
-            else:
-                pygame.draw.rect(self.screen, (100, 200, 255), entry_rect)
-                pygame.draw.rect(self.screen, (150, 220, 255), entry_rect, 2)
+            # Draw spawn marker (yellow circle)
+            pygame.draw.circle(self.screen, COLOR_SPAWN, spawn_rect.center, int(tile_size_zoomed * 0.4))
+            pygame.draw.circle(self.screen, (255, 255, 255), spawn_rect.center, int(tile_size_zoomed * 0.4), 2)
             
-            # Label with room name if zoom allows
+            # Label
             if self.zoom >= 0.8:
-                label = from_room[:6]  # Truncate long names
-                label_surf = self.font.render(label, True, (255, 255, 255))
-                label_rect = label_surf.get_rect(centerx=screen_x + tile_size_zoomed/2,
-                                                top=screen_y + tile_size_zoomed + 2)
-                # Background for readability
-                bg_rect = label_rect.inflate(4, 2)
-                pygame.draw.rect(self.screen, (0, 0, 0, 128), bg_rect)
+                label_surf = self.font.render("SPAWN", True, (0, 0, 0))
+                label_rect = label_surf.get_rect(center=spawn_rect.center)
                 self.screen.blit(label_surf, label_rect)
         
         # Draw line/rect preview
