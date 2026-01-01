@@ -9,6 +9,7 @@ TILE_SPIKE = 2
 TILE_GRAPPLE = 3
 TILE_EXIT = 4
 TILE_PLATFORM = 5
+OBJ_PLATFORM = "platform"
 
 TILE_COLORS = {
     TILE_EMPTY: None,
@@ -51,6 +52,9 @@ class Room:
         
         # Spawn point (local to room)
         self.spawn = None
+        
+        # Room Objects
+        self.objects = []
         
         self._load(filepath)
     
@@ -107,14 +111,28 @@ class Room:
                         self.tiles[y][x] = TILE_SOLID
     
     def _parse_objects(self, layer):
-        """Parse object layer for spawn point only."""
+        """Parse object layer for spawn point and game objects."""
         for obj in layer.get('objects', []):
             obj_type = obj.get('type', '').lower()
             obj_name = obj.get('name', '').lower()
             
-            # Only look for spawn points
+            # Spawn point
             if 'spawn' in obj_type or 'spawn' in obj_name:
                 self.spawn = (obj.get('x', 64), obj.get('y', 64))
+            
+            # Platforms / Planks
+            elif obj_type == OBJ_PLATFORM:
+                # Create RoomObject
+                # Note: Tiled objects are (x, y) = Top Left
+                x = obj.get('x', 0)
+                y = obj.get('y', 0)
+                w = obj.get('width', 32)
+                h = obj.get('height', 16)
+                
+                new_obj = RoomObject(x, y, w, h, obj_type)
+                new_obj.world_x = self.world_x + x
+                new_obj.world_y = self.world_y + y
+                self.objects.append(new_obj)
     
     def get_spawn_world(self):
         """Get spawn point in world coordinates."""
@@ -156,6 +174,15 @@ class Room:
                     if rect.colliderect(tile_rect):
                         results.append(Tile(tile_rect, tile_type))
         
+        return results
+
+    def get_object_collisions(self, rect):
+        """Get object collisions for a world-space rect."""
+        results = []
+        for obj in self.objects:
+            # Simple AABB check first
+            if rect.colliderect(obj.rect):
+                results.append(obj)
         return results
     
     def get_solid_collisions(self, rect):
@@ -220,6 +247,66 @@ class Room:
                         # Draw platform top detail
                         top_line = pygame.Rect(screen_rect.x, screen_rect.y, screen_rect.width, max(1, int(4 * camera.scale_y)))
                         pygame.draw.rect(surface, (120, 100, 70), top_line)
+        
+        # Draw Objects
+        for obj in self.objects:
+            obj.draw(surface, camera)
+
+
+class RoomObject:
+    """A game object (e.g. platform) with visual and collision properties."""
+    def __init__(self, x, y, width, height, type_name):
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.type = type_name
+        self.world_x = 0 # Updates when room loads
+        self.world_y = 0
+        
+        self.image = None
+        self.mask = None
+        
+        # Attempt to load asset
+        self._load_asset()
+        
+    @property
+    def rect(self):
+        return pygame.Rect(self.world_x, self.world_y, self.width, self.height)
+        
+    def _load_asset(self):
+        """Load specific asset image based on type."""
+        # Simple mapping for now
+        filename = None
+        if self.type == OBJ_PLATFORM:
+            # We assume assets folder structure
+            # If width is 32, look for plank32.png, else plank.png etc.
+            filename = "assets/objects/plank.png" 
+            
+        if filename and os.path.exists(filename):
+            try:
+                raw_img = pygame.image.load(filename).convert_alpha()
+                # Scale if necessary, or tile? For now, scale to fit object dimensions
+                self.image = pygame.transform.scale(raw_img, (int(self.width), int(self.height)))
+                self.mask = pygame.mask.from_surface(self.image)
+            except Exception as e:
+                print(f"Failed to load asset {filename}: {e}")
+                self.image = None
+    
+    def draw(self, surface, camera):
+        screen_rect = camera.apply_rect(self.rect)
+        
+        if self.image:
+            # Scale image dynamically with camera zoom
+            scaled_img = pygame.transform.scale(self.image, (screen_rect.width, screen_rect.height))
+            surface.blit(scaled_img, screen_rect)
+        else:
+            # Fallback drawing
+            if self.type == OBJ_PLATFORM:
+                pygame.draw.rect(surface, (150, 120, 70), screen_rect)
+                pygame.draw.rect(surface, (100, 80, 40), screen_rect, 2)
+            else:
+                pygame.draw.rect(surface, (255, 0, 255), screen_rect, 1)
 
 
 class RoomManager:
@@ -318,10 +405,28 @@ class RoomManager:
         return collisions
     
     def get_solid_collisions(self, rect):
-        """Get solid collisions from current room only."""
+        """Get solid collisions and platform object collisions."""
+        collisions = []
         if self.current_room:
-            return self.current_room.get_solid_collisions(rect)
-        return []
+             # Solid tiles
+             collisions.extend(self.current_room.get_solid_collisions(rect))
+             
+             # Platform objects (treated as solids for now, or handled separately in physics)
+             # NOTE: Physics engine should call get_object_collisions separately for pixel perfect
+        return collisions
+    
+    def get_object_collisions(self, rect):
+        """Get object collisions from current and adjacent rooms."""
+        collisions = []
+        if self.current_room:
+            collisions.extend(self.current_room.get_object_collisions(rect))
+        
+        # Check adjacent rooms
+        for room in self.rooms.values():
+            if room != self.current_room and room.bounds.inflate(64, 64).colliderect(rect):
+                collisions.extend(room.get_object_collisions(rect))
+        
+        return collisions
     
     def check_room_transition(self, player_rect):
         """Check if player should transition to another room."""

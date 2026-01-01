@@ -13,9 +13,9 @@ import sys
 # CONSTANTS
 # ============================================================================
 
-TILE_SIZE = 32
-DEFAULT_ROOM_WIDTH = 20   # tiles
-DEFAULT_ROOM_HEIGHT = 12  # tiles
+TILE_SIZE = 16
+DEFAULT_ROOM_WIDTH = 40   # tiles
+DEFAULT_ROOM_HEIGHT = 24  # tiles
 
 # Tile types
 TILE_EMPTY = 0
@@ -24,6 +24,10 @@ TILE_SPIKE = 2
 TILE_GRAPPLE = 3
 TILE_EXIT = 4
 TILE_PLATFORM = 5
+TILE_ICE = 6
+
+# Object types
+OBJ_PLATFORM = "platform"
 
 TILE_NAMES = {
     TILE_EMPTY: "Empty",
@@ -32,6 +36,7 @@ TILE_NAMES = {
     TILE_GRAPPLE: "Grapple",
     TILE_EXIT: "Exit",
     TILE_PLATFORM: "Platform",
+    TILE_ICE: "Ice",
 }
 
 TILE_COLORS = {
@@ -41,7 +46,10 @@ TILE_COLORS = {
     TILE_GRAPPLE: (50, 150, 200),
     TILE_EXIT: (50, 200, 80),
     TILE_PLATFORM: (120, 90, 50),
+    TILE_ICE: (100, 200, 255),
 }
+
+SUBGRID_SIZE = 16
 
 # UI Colors
 COLOR_BG = (20, 20, 25)
@@ -54,7 +62,15 @@ COLOR_BUTTON = (50, 50, 65)
 COLOR_BUTTON_HOVER = (70, 70, 90)
 COLOR_BUTTON_ACTIVE = (100, 80, 80)
 COLOR_ACCENT = (220, 80, 80)
+COLOR_BUTTON_HOVER = (70, 70, 90)
+COLOR_BUTTON_ACTIVE = (100, 80, 80)
+COLOR_ACCENT = (220, 80, 80)
 COLOR_SPAWN = (255, 220, 50)
+
+# Layout
+TOOLBAR_HEIGHT = 40
+SIDEBAR_WIDTH = 240
+
 
 # ============================================================================
 # ROOM DATA
@@ -67,6 +83,7 @@ class RoomData:
         self.width = width
         self.height = height
         self.tiles = [[TILE_EMPTY] * width for _ in range(height)]
+        self.objects = []  # List of dicts: {type, x, y, w, h}
         # Single spawn point: (x, y) in tile coordinates
         self.spawn = None  # Set to (x, y) when placed
         self.modified = False
@@ -133,8 +150,9 @@ class RoomData:
         self.modified = True
     
     def clear(self):
-        """Clear all tiles."""
+        """Clear all tiles and objects."""
         self.tiles = [[TILE_EMPTY] * self.width for _ in range(self.height)]
+        self.objects = []
         self.modified = True
     
     def to_json(self):
@@ -171,6 +189,20 @@ class RoomData:
                 }
             ]
         }
+        
+        # Add other objects
+        obj_layer = data["layers"][1]
+        for obj in self.objects:
+            obj_layer["objects"].append({
+                "name": obj["type"],
+                "type": obj["type"],
+                "x": obj["x"],
+                "y": obj["y"],
+                "width": obj["w"],
+                "height": obj["h"]
+            })
+            
+        return data
     
     def from_json(self, data):
         """Load from JSON data."""
@@ -197,6 +229,14 @@ class RoomData:
                         x = int(obj.get("x", 64) // TILE_SIZE)
                         y = int(obj.get("y", 64) // TILE_SIZE)
                         self.spawn = (x, y)
+                    elif obj_type == OBJ_PLATFORM:
+                         self.objects.append({
+                            "type": OBJ_PLATFORM,
+                            "x": obj.get("x", 0),
+                            "y": obj.get("y", 0),
+                            "w": obj.get("width", 32),
+                            "h": obj.get("height", 16)
+                         })
         
         self.modified = False
     
@@ -215,6 +255,77 @@ class RoomData:
         self.filename = filepath
         self.modified = False
 
+
+# ============================================================================
+# AUTO-TILING
+# ============================================================================
+
+class AutoTiler:
+    """Handles auto-tiling logic and assets."""
+    
+    def __init__(self):
+        self.tilesets = {}
+        self.load_assets()
+        
+    def load_assets(self):
+        """Load tileset images."""
+        try:
+            # Load Ice tileset (3x3 grid)
+            if os.path.exists("assets/tilesets/ice.png"):
+                img = pygame.image.load("assets/tilesets/ice.png").convert_alpha()
+                self.tilesets[TILE_ICE] = self.split_tileset(img, 32)
+        except Exception as e:
+            print(f"Error loading assets: {e}")
+
+    def split_tileset(self, img, size):
+        """Split 3x3 tileset into list of surfaces."""
+        tiles = []
+        for y in range(3):
+            for x in range(3):
+                rect = pygame.Rect(x*size, y*size, size, size)
+                tiles.append(img.subsurface(rect))
+        return tiles
+
+    def get_tile_index(self, neighbors):
+        """
+        Get index (0-8) based on neighbors (T, B, L, R).
+        neighbors: list of bools [Top, Bottom, Left, Right]
+        """
+        t, b, l, r = neighbors
+        
+        # Map neighbors to 3x3 grid index
+        # Row 0 (Top): No top neighbor
+        # Row 1 (Mid): Top and Bottom neighbors (or just Top) ? 
+        # Actually logic is:
+        # Top-Left (0): No Top, No Left
+        # Top-Mid (1): No Top, Yes Left, Yes Right (or just Yes L/R?)
+        
+        # Simplified 3x3 Logic:
+        # Y position determined by Top/Bottom
+        # 0 (Top): No Top neighbor
+        # 1 (Mid): Top and Bottom neighbors
+        # 2 (Bot): No Bottom neighbor
+        # Note: If no top AND no bottom -> Single vertical block? 
+        # For 3x3, we usually assume connected blobs.
+        
+        col = 1
+        if not l: col = 0
+        elif not r: col = 2
+        
+        row = 1
+        if not t: row = 0
+        elif not b: row = 2
+        
+        return row * 3 + col
+
+    def draw_tile(self, surface, tile_type, rect, neighbors):
+        """Draw auto-tiled rect."""
+        if tile_type in self.tilesets:
+            idx = self.get_tile_index(neighbors)
+            surface.blit(self.tilesets[tile_type][idx], rect)
+        else:
+            # Fallback
+            pygame.draw.rect(surface, TILE_COLORS.get(tile_type, (255,0,255)), rect)
 
 # ============================================================================
 # UI COMPONENTS
@@ -838,6 +949,8 @@ class RoomEditor:
         self.room = RoomData()
         self.room.fill_borders()
         
+        self.autotiler = AutoTiler()
+        
         # View
         self.zoom = 1.0
         self.min_zoom = 0.25
@@ -849,15 +962,21 @@ class RoomEditor:
         
         # Tools
         self.current_tile = TILE_SOLID
-        self.tool = "paint"  # paint, fill, line, rect, spawn, entry
+        self.tool = "paint"  # paint, fill, line, rect, spawn, entry, platform
         self.painting = False
         self.erasing = False
         
         # Line/rect tool state
         self.line_start = None
         
+        # Line/rect tool state
+        self.line_start = None
+        
         # UI
-        self.panel_width = 200
+        self.sidebar_width = SIDEBAR_WIDTH
+        self.toolbar_height = TOOLBAR_HEIGHT
+        self.sidebar_scroll = 0
+        self.sidebar_content_height = 0
         self.setup_ui()
         
         # File dialog
@@ -874,60 +993,80 @@ class RoomEditor:
     
     def setup_ui(self):
         """Setup UI elements."""
-        # Tile buttons in a 3x2 grid for compactness
-        self.tile_buttons = []
-        start_x = 15
-        start_y = 50
-        size = 32
-        spacing = 50  # Enough for label below
-        cols = 3
         
-        for tile_type in range(6):
-            col = tile_type % cols
-            row = tile_type // cols
-            x = start_x + col * spacing
-            y = start_y + row * (size + 25)  # Extra space for label
-            btn = TileButton(x, y, size, tile_type)
-            if tile_type == self.current_tile:
-                btn.active = True
-            self.tile_buttons.append(btn)
+        # --- Toolbar Elements (Top) ---
+        toolbar_y = 7
         
-        # Tool buttons in a row/compact vertical list
-        self.tool_buttons = []
-        tools = [("Paint", "paint"), ("Fill", "fill"), ("Line", "line"), 
-                 ("Rect", "rect"), ("Spawn", "spawn")]
-        
-        y = 170
-        for i, (name, tool) in enumerate(tools):
-            btn = Button(15, y + i * 32, 80, 26, name, toggle=True)
-            btn.tool = tool
-            if tool == self.tool:
-                btn.active = True
-            self.tool_buttons.append(btn)
-        
-        # Size inputs
-        y_size = 350
-        self.width_input = InputBox(15, y_size, 50, 22, str(self.room.width), "W")
-        self.height_input = InputBox(80, y_size, 50, 22, str(self.room.height), "H")
-        self.resize_btn = Button(140, y_size, 40, 22, "Set", self.apply_resize)
-        
-        # Action buttons - compact 2-column layout
-        y = 400
-        btn_w = 85
+        # File Operations
+        x = 5
+        btn_w = 60
         btn_h = 26
         gap = 5
         
         self.action_buttons = [
-            Button(15, y, btn_w, btn_h, "New", self.new_room),
-            Button(15 + btn_w + gap, y, btn_w, btn_h, "Open", self.open_room),
-            Button(15, y + btn_h + gap, btn_w, btn_h, "Save", self.save_room),
-            Button(15 + btn_w + gap, y + btn_h + gap, btn_w, btn_h, "Save As", self.save_room_as),
-            Button(15, y + (btn_h + gap) * 2, btn_w, btn_h, "Borders", self.room.fill_borders),
-            Button(15 + btn_w + gap, y + (btn_h + gap) * 2, btn_w, btn_h, "Clear", self.clear_room),
+            Button(x, toolbar_y, btn_w, btn_h, "New", self.new_room),
+            Button(x + btn_w + gap, toolbar_y, btn_w, btn_h, "Open", self.open_room),
+            Button(x + (btn_w + gap)*2, toolbar_y, btn_w, btn_h, "Save", self.save_room),
+            Button(x + (btn_w + gap)*3, toolbar_y, btn_w+10, btn_h, "Save As", self.save_room_as),
         ]
         
-        # Back button at bottom
-        self.action_buttons.append(Button(15, self.screen.get_height() - 80, self.panel_width - 30, 35, "Back to Menu", self.exit_editor))
+        x += (btn_w + gap) * 4 + 10
+        
+        # Room Size
+        self.width_input = InputBox(x, toolbar_y+2, 40, 22, str(self.room.width), "W:")
+        self.height_input = InputBox(x + 55, toolbar_y+2, 40, 22, str(self.room.height), "H:")
+        self.resize_btn = Button(x + 110, toolbar_y, 40, 26, "Set", self.apply_resize)
+        
+        x += 160 + 10
+        
+        # Editing Tools (Horizontal)
+        tools = [("Paint", "paint"), ("Fill", "fill"), ("Line", "line"), 
+                 ("Rect", "rect"), ("Spawn", "spawn"), ("Plat", "platform")]
+                 
+        self.tool_buttons = []
+        for name, tool in tools:
+            w = 50
+            if name in ("Paint", "Fill", "Line", "Rect"): w = 45
+            btn = Button(x, toolbar_y, w, btn_h, name, toggle=True)
+            btn.tool = tool
+            if tool == self.tool:
+                btn.active = True
+            self.tool_buttons.append(btn)
+            x += w + 2
+            
+        # Extra Actions
+        x += 10
+        self.action_buttons.append(Button(x, toolbar_y, 60, btn_h, "Borders", self.room.fill_borders))
+        self.action_buttons.append(Button(x + 65, toolbar_y, 60, btn_h, "Clear", self.clear_room))
+        
+        # Back Button (Far Right)
+        self.exit_btn = Button(1150, toolbar_y, 100, btn_h, "Exit", self.exit_editor)
+
+
+        # --- Sidebar Elements (Left) ---
+        # Tile buttons in a grid
+        self.tile_buttons = []
+        start_x = 15
+        start_y = 10 # Relative to scroll content start
+        size = 48
+        spacing_x = 70
+        spacing_y = 70
+        cols = 3
+        
+        tile_types = [TILE_EMPTY, TILE_SOLID, TILE_SPIKE, TILE_GRAPPLE, TILE_EXIT, TILE_PLATFORM, TILE_ICE]
+        
+        for i, tile_type in enumerate(tile_types):
+            col = i % cols
+            row = i // cols
+            btn_x = start_x + col * spacing_x
+            btn_y = start_y + row * spacing_y
+            
+            btn = TileButton(btn_x, btn_y, size, tile_type)
+            if tile_type == self.current_tile:
+                btn.active = True
+            self.tile_buttons.append(btn)
+            
+        self.sidebar_content_height = start_y + (len(tile_types) // cols + 1) * spacing_y + 50
         
     def exit_editor(self):
         """Exit the editor."""
@@ -942,6 +1081,7 @@ class RoomEditor:
         """Save current state for undo."""
         state = {
             'tiles': [row[:] for row in self.room.tiles],
+            'objects': [obj.copy() for obj in self.room.objects],
             'spawn': self.room.spawn
         }
         self.undo_stack.append(state)
@@ -964,6 +1104,7 @@ class RoomEditor:
         # Restore previous
         state = self.undo_stack.pop()
         self.room.tiles = state['tiles']
+        self.room.objects = state.get('objects', [])
         self.room.spawn = state['spawn']
         self.room.modified = True
         self.show_message("Undo")
@@ -983,6 +1124,7 @@ class RoomEditor:
         # Restore
         state = self.redo_stack.pop()
         self.room.tiles = state['tiles']
+        self.room.objects = state.get('objects', [])
         self.room.spawn = state['spawn']
         self.room.modified = True
         self.show_message("Redo")
@@ -1046,8 +1188,8 @@ class RoomEditor:
     
     def center_view(self):
         """Center view on room."""
-        canvas_width = self.screen.get_width() - self.panel_width
-        canvas_height = self.screen.get_height()
+        canvas_width = self.screen.get_width() - self.sidebar_width
+        canvas_height = self.screen.get_height() - self.toolbar_height
         
         room_pixel_width = self.room.width * TILE_SIZE * self.zoom
         room_pixel_height = self.room.height * TILE_SIZE * self.zoom
@@ -1057,9 +1199,9 @@ class RoomEditor:
     
     def screen_to_tile(self, screen_x, screen_y):
         """Convert screen position to tile coordinates."""
-        # Adjust for panel
-        world_x = (screen_x - self.panel_width - self.camera_x) / self.zoom
-        world_y = (screen_y - self.camera_y) / self.zoom
+        # Adjust for sidebar and toolbar
+        world_x = (screen_x - self.sidebar_width - self.camera_x) / self.zoom
+        world_y = (screen_y - self.toolbar_height - self.camera_y) / self.zoom
         
         tile_x = int(world_x // TILE_SIZE)
         tile_y = int(world_y // TILE_SIZE)
@@ -1068,8 +1210,8 @@ class RoomEditor:
     
     def tile_to_screen(self, tile_x, tile_y):
         """Convert tile coordinates to screen position."""
-        screen_x = tile_x * TILE_SIZE * self.zoom + self.camera_x + self.panel_width
-        screen_y = tile_y * TILE_SIZE * self.zoom + self.camera_y
+        screen_x = tile_x * TILE_SIZE * self.zoom + self.camera_x + self.sidebar_width
+        screen_y = tile_y * TILE_SIZE * self.zoom + self.camera_y + self.toolbar_height
         return screen_x, screen_y
     
     def flood_fill(self, start_x, start_y, target_tile, replacement_tile):
@@ -1174,69 +1316,221 @@ class RoomEditor:
             if event.type == pygame.MOUSEBUTTONDOWN:
                 mouse_clicked = True
                 
-                # Right click to remove
-                if event.button == 3 and event.pos[0] > self.panel_width:
-                    tile_x, tile_y = self.screen_to_tile(*event.pos)
-                    
-                    # Check if clicking on spawn point
-                    removed_spawn = False
-                    if self.room.spawn:
-                        sx, sy = self.room.spawn
-                        if sx == tile_x and sy == tile_y:
-                            self.save_undo()
-                            self.room.clear_spawn()
-                            self.show_message("Spawn point removed")
-                            removed_spawn = True
-                    
-                    # If not an entry point, clear the tile
-                    if not removed_spawn and 0 <= tile_x < self.room.width and 0 <= tile_y < self.room.height:
-                        if self.room.tiles[tile_y][tile_x] != TILE_EMPTY:
-                            self.save_undo()
-                            self.room.set_tile(tile_x, tile_y, TILE_EMPTY)
-                            self.show_message("Tile cleared")
+                # Check regions
+                in_sidebar = event.pos[0] < self.sidebar_width and event.pos[1] > self.toolbar_height
+                in_toolbar = event.pos[1] < self.toolbar_height
+                in_canvas = event.pos[0] > self.sidebar_width and event.pos[1] > self.toolbar_height
                 
-                # Left click for tools (in canvas area)
-                elif event.button == 1 and event.pos[0] > self.panel_width:
-                    tile_x, tile_y = self.screen_to_tile(*event.pos)
+                # Canvas Interactions
+                if in_canvas:
+                    # Right click to remove
+                    if event.button == 3:
+                        tile_x, tile_y = self.screen_to_tile(*event.pos)
+                        
+                        # 1. Check for Objects to remove (Planks, etc.)
+                        removed_object = False
+                        world_x = (event.pos[0] - self.sidebar_width - self.camera_x) / self.zoom
+                        world_y = (event.pos[1] - self.toolbar_height - self.camera_y) / self.zoom
+                        mouse_rect = pygame.Rect(world_x, world_y, 1, 1)
+                        
+                        for i, obj in enumerate(self.room.objects):
+                            obj_rect = pygame.Rect(obj["x"], obj["y"], obj["w"], obj["h"])
+                            if obj_rect.colliderect(mouse_rect):
+                                self.save_undo()
+                                self.room.objects.pop(i)
+                                self.show_message("Object removed")
+                                removed_object = True
+                                break
+                        
+                        if removed_object:
+                            # Skip tile removal if we hit an object
+                            pass
+                        else:
+                            # 2. Check if clicking on spawn point
+                            removed_spawn = False
+                            if self.room.spawn:
+                                sx, sy = self.room.spawn
+                                if sx == tile_x and sy == tile_y:
+                                    self.save_undo()
+                                    self.room.clear_spawn()
+                                    self.show_message("Spawn point removed")
+                                    removed_spawn = True
+                            
+                            
+                            # 3. Clear Tiles based on Current Tool Size
+                            if not removed_spawn and 0 <= tile_x < self.room.width and 0 <= tile_y < self.room.height:
+                                # Determine eraser size based on CURRENTLY SELECTED tile
+                                # "Make the remove size changable but also set automatically to the tile size of currently selected"
+                                # "right click and empry should be just 32x32"
+                                
+                                eraser_w = 1
+                                eraser_h = 1
+                                
+                                # If current tool is Solid, Ice, or we are just generic (Paint tool default usually), use 32x32
+                                # Assuming if current_tile is 0 (Empty), we implies 32x32
+                                if self.current_tile in (TILE_SOLID, TILE_ICE, TILE_EMPTY):
+                                    eraser_w = 2
+                                    eraser_h = 2
+                                elif self.tool == "platform":
+                                    eraser_w = 4
+                                    eraser_h = 2
+                                
+                                self.save_undo()
+                                
+                                # Calculate base alignment
+                                if eraser_w > 1:
+                                    base_x = (tile_x // 2) * 2 # Align to 32px grid
+                                    base_y = (tile_y // 2) * 2
+                                else:
+                                    base_x = tile_x
+                                    base_y = tile_y
+                                    
+                                    base_x = tile_x
+                                    base_y = tile_y
+                                    
+                                # 1. Remove overlapping objects in this area
+                                pixel_area_rect = pygame.Rect(base_x * 16, base_y * 16, eraser_w * 16, eraser_h * 16)
+                                self._remove_objects_in_rect(pixel_area_rect)
+
+                                # 2. Remove tiles in area (Always do both)
+                                for dy in range(eraser_h):
+                                    for dx in range(eraser_w):
+                                        tx = base_x + dx
+                                        ty = base_y + dy
+                                        if 0 <= tx < self.room.width and 0 <= ty < self.room.height:
+                                            self.room.set_tile(tx, ty, TILE_EMPTY)
+                                            
+                                self.show_message("Area cleared")
                     
-                    if self.tool == "spawn":
-                        # Set spawn point
-                        if 0 <= tile_x < self.room.width and 0 <= tile_y < self.room.height:
+                    # Left click for tools
+                    elif event.button == 1:
+                        tile_x, tile_y = self.screen_to_tile(*event.pos)
+                        
+                        if self.tool == "spawn":
+                            # Set spawn point
+                            if 0 <= tile_x < self.room.width and 0 <= tile_y < self.room.height:
+                                self.save_undo()
+                                self.room.set_spawn(tile_x, tile_y)
+                                self.show_message("Spawn point set")
+                        elif self.tool == "fill":
+                            target = self.room.get_tile(tile_x, tile_y)
                             self.save_undo()
-                            self.room.set_spawn(tile_x, tile_y)
-                            self.show_message("Spawn point set")
-                    elif self.tool == "fill":
-                        target = self.room.get_tile(tile_x, tile_y)
-                        self.save_undo()
-                        self.flood_fill(tile_x, tile_y, target, self.current_tile)
-                    elif self.tool in ("line", "rect"):
-                        self.line_start = (tile_x, tile_y)
-                    else:
-                        self.painting = True
-                        self.save_undo()
-                        self.room.set_tile(tile_x, tile_y, self.current_tile)
-                
-                # Scroll to zoom
-                elif event.button == 4:  # Scroll up
-                    old_zoom = self.zoom
-                    self.zoom = min(self.max_zoom, self.zoom * 1.2)
-                    # Zoom toward mouse
-                    if event.pos[0] > self.panel_width:
+                            self.flood_fill(tile_x, tile_y, target, self.current_tile)
+                        elif self.tool in ("line", "rect"):
+                            self.line_start = (tile_x, tile_y)
+                        elif self.tool == "platform":
+                            # Add subgrid platform
+                            # Snap to 8x8 grid
+                            world_x = (event.pos[0] - self.sidebar_width - self.camera_x) / self.zoom
+                            world_y = (event.pos[1] - self.toolbar_height - self.camera_y) / self.zoom
+                            
+                            # Snap to specific requirements:
+                            # X: Same as 32x32 blocks -> 32px snapping
+                            # Y: 2 spaces for each 32x32 -> 16px snapping
+                            # Snap to specific requirements:
+                            # X: Same as 32x32 blocks -> 32px snapping
+                            # Y: 2 spaces for each 32x32 -> 16px snapping
+                            # Snap to specific requirements:
+                            # X: Same as 32x32 blocks (32px pixels)
+                            # Y: 2 spaces for each 32x32 block (16px pixels)
+                            # TILE_SIZE is 16. 
+                            
+                            grid_x = int(world_x // 32) * 32
+                            grid_y = int(world_y // 16) * 16
+                            
+                            # Check if platform already exists at this location
+                            exists = False
+                            for obj in self.room.objects:
+                                if (obj["type"] == OBJ_PLATFORM and 
+                                    abs(obj["x"] - grid_x) < 2 and abs(obj["y"] - grid_y) < 2):
+                                    exists = True
+                                    break
+                            
+                            if not exists:
+                                self.save_undo()
+                                
+                                # Clear Tiles Underneath (Mutual Exclusion)
+                                # Plank is 32wide (2 tiles) x 16high (1 tile)
+                                tile_start_x = grid_x // 16
+                                tile_start_y = grid_y // 16
+                                for dy in range(1):
+                                    for dx in range(2):
+                                        tx = tile_start_x + dx
+                                        ty = tile_start_y + dy
+                                        if 0 <= tx < self.room.width and 0 <= ty < self.room.height:
+                                            self.room.set_tile(tx, ty, TILE_EMPTY)
+
+                                # Add Object
+                                self.room.objects.append({
+                                    "type": OBJ_PLATFORM,
+                                    "x": grid_x,
+                                    "y": grid_y,
+                                    "w": 32, # 2 Tiles wide
+                                    "h": 16  # 1 Tile high
+                                })
+                                self.show_message("Platform placed")
+    
+                        else:
+                            self.painting = True
+                            self.save_undo()
+                            
+                            # Generic Paint Tool
+                            if self.current_tile in (TILE_SOLID, TILE_ICE):
+                                # Snap to even grid (32px) and place 2x2
+                                base_x = (tile_x // 2) * 2
+                                base_y = (tile_y // 2) * 2
+                                
+                                # Auto-remove any objects in this space
+                                # 32x32 area. We are in 16x16 tile coords.
+                                # base_x is aligned to 2.
+                                pixel_area_rect = pygame.Rect(base_x * TILE_SIZE, base_y * TILE_SIZE, 32, 32)
+                                self._remove_objects_in_rect(pixel_area_rect)
+
+                                for dy in range(2):
+                                    for dx in range(2):
+                                        self.room.set_tile(base_x + dx, base_y + dy, self.current_tile)
+                            else:
+                                # Single tile paint (e.g. Spikes)
+                                # Should we remove objects here too? Maybe not enforced, but good for consistency
+                                # If placing a spike (16x16), check if it overlaps a plank?
+                                # User complained about "plank should be removed if drawn over with something else"
+                                
+                                # Let's be safe: If painting ANYTHING, remove objects in that cell.
+                                pixel_area_rect = pygame.Rect(tile_x * TILE_SIZE, tile_y * TILE_SIZE, 16, 16)
+                                self._remove_objects_in_rect(pixel_area_rect)
+                                
+                                self.room.set_tile(tile_x, tile_y, self.current_tile)
+                    
+                    # Scroll to zoom
+                    elif event.button == 4:  # Scroll up
+                        old_zoom = self.zoom
+                        self.zoom = min(self.max_zoom, self.zoom * 1.2)
+                        # Zoom toward mouse
                         factor = self.zoom / old_zoom
-                        mx = event.pos[0] - self.panel_width
-                        my = event.pos[1]
+                        mx = event.pos[0] - self.sidebar_width
+                        my = event.pos[1] - self.toolbar_height
                         self.camera_x = mx - (mx - self.camera_x) * factor
                         self.camera_y = my - (my - self.camera_y) * factor
-                
-                elif event.button == 5:  # Scroll down
-                    old_zoom = self.zoom
-                    self.zoom = max(self.min_zoom, self.zoom / 1.2)
-                    if event.pos[0] > self.panel_width:
+                    
+                    elif event.button == 5:  # Scroll down
+                        old_zoom = self.zoom
+                        self.zoom = max(self.min_zoom, self.zoom / 1.2)
                         factor = self.zoom / old_zoom
-                        mx = event.pos[0] - self.panel_width
-                        my = event.pos[1]
+                        mx = event.pos[0] - self.sidebar_width
+                        my = event.pos[1] - self.toolbar_height
                         self.camera_x = mx - (mx - self.camera_x) * factor
                         self.camera_y = my - (my - self.camera_y) * factor
+
+            elif event.type == pygame.MOUSEWHEEL:
+                mouse_pos = pygame.mouse.get_pos()
+                if mouse_pos[0] < self.sidebar_width and mouse_pos[1] > self.toolbar_height:
+                    # Sidebar scroll
+                    scroll_speed = 30
+                    self.sidebar_scroll -= event.y * scroll_speed
+                    
+                    # Clamp scroll
+                    max_scroll = max(0, self.sidebar_content_height - (self.screen.get_height() - self.toolbar_height - 30))
+                    self.sidebar_scroll = max(0, min(self.sidebar_scroll, max_scroll))
             
             elif event.type == pygame.MOUSEBUTTONUP:
                 if event.button in (2, 3):
@@ -1246,7 +1540,7 @@ class RoomEditor:
                     self.painting = False
                     
                     # Complete line/rect
-                    if self.line_start and event.pos[0] > self.panel_width:
+                    if self.line_start and event.pos[0] > self.sidebar_width and event.pos[1] > self.toolbar_height:
                         tile_x, tile_y = self.screen_to_tile(*event.pos)
                         self.save_undo()
                         
@@ -1267,9 +1561,27 @@ class RoomEditor:
                     self.camera_y += dy
                     self.last_mouse_pos = event.pos
                 
-                elif self.painting and event.pos[0] > self.panel_width:
+                elif self.painting and event.pos[0] > self.sidebar_width and event.pos[1] > self.toolbar_height:
                     tile_x, tile_y = self.screen_to_tile(*event.pos)
-                    self.room.set_tile(tile_x, tile_y, self.current_tile)
+                    
+                    if self.current_tile in (TILE_SOLID, TILE_ICE):
+                        # Snap to even grid (32px)
+                        base_x = (tile_x // 2) * 2
+                        base_y = (tile_y // 2) * 2
+                        
+                        # Auto-remove objects in this 32x32 area
+                        pixel_area_rect = pygame.Rect(base_x * TILE_SIZE, base_y * TILE_SIZE, 32, 32)
+                        self._remove_objects_in_rect(pixel_area_rect)
+                        
+                        # Set 2x2 block
+                        for dy in range(2):
+                            for dx in range(2):
+                                self.room.set_tile(base_x + dx, base_y + dy, self.current_tile)
+                    else:
+                        # Single tile paint
+                        pixel_area_rect = pygame.Rect(tile_x * TILE_SIZE, tile_y * TILE_SIZE, 16, 16)
+                        self._remove_objects_in_rect(pixel_area_rect)
+                        self.room.set_tile(tile_x, tile_y, self.current_tile)
             
             elif event.type == pygame.KEYDOWN:
                 # Keyboard shortcuts
@@ -1294,12 +1606,12 @@ class RoomEditor:
                 
                 # Number keys for tiles
                 elif event.key in (pygame.K_0, pygame.K_1, pygame.K_2, 
-                                  pygame.K_3, pygame.K_4, pygame.K_5):
+                                  pygame.K_3, pygame.K_4, pygame.K_5, pygame.K_6):
                     tile = event.key - pygame.K_0
-                    if tile < len(self.tile_buttons):
-                        self.current_tile = tile
-                        for btn in self.tile_buttons:
-                            btn.active = btn.tile_type == tile
+                    if tile == 6: tile = TILE_ICE # 6 -> Ice
+                    
+                    # Map to button index if needed
+                    self.current_tile = tile
                 
                 # Tool shortcuts
                 elif event.key == pygame.K_b:
@@ -1312,6 +1624,8 @@ class RoomEditor:
                     self.set_tool("rect")
                 elif event.key == pygame.K_e:
                     self.set_tool("entry")
+                elif event.key == pygame.K_p:
+                    self.set_tool("platform")
                 
                 # WASD movement
                 elif event.key == pygame.K_w:
@@ -1350,12 +1664,36 @@ class RoomEditor:
         
         # UI button updates
         if not self.file_dialog.active:
-            # Tile buttons
+            # Tile buttons - Adjust for scroll
+            header_h = 30
+            start_y = self.toolbar_height + header_h - self.sidebar_scroll
+            
+            # Clip mouse for sidebar buttons
+            mouse_in_sidebar_content = (mouse_pos[0] < self.sidebar_width and 
+                                      mouse_pos[1] > self.toolbar_height + header_h)
+
             for btn in self.tile_buttons:
-                if btn.update(mouse_pos, mouse_clicked):
-                    self.current_tile = btn.tile_type
-                    for other in self.tile_buttons:
-                        other.active = other.tile_type == self.current_tile
+                # Temporarily move rect
+                original_y = btn.rect.y
+                btn.rect.y += start_y
+                
+                # Update only if mouse is in visible area
+                if mouse_in_sidebar_content:
+                    if btn.update(mouse_pos, mouse_clicked):
+                        if btn.tile_type == TILE_PLATFORM:
+                            # Special case: Platform button activates Platform Tool (Object)
+                            self.set_tool("platform")
+                            self.show_message("Platform Tool Selected")
+                        else:
+                            self.current_tile = btn.tile_type
+                            # Reset tool to paint if we act like a tile selector
+                            if self.tool not in ("paint", "fill", "line", "rect"):
+                                self.set_tool("paint")
+                            
+                # Update active state visualization
+                btn.active = (btn.tile_type == self.current_tile) if btn.tile_type != TILE_PLATFORM else (self.tool == "platform")
+                
+                btn.rect.y = original_y # Restore
             
             # Tool buttons
             for btn in self.tool_buttons:
@@ -1367,13 +1705,26 @@ class RoomEditor:
                 btn.update(mouse_pos, mouse_clicked)
             
             self.resize_btn.update(mouse_pos, mouse_clicked)
+            self.exit_btn.update(mouse_pos, mouse_clicked)
     def set_tool(self, tool):
-
         """Set current tool."""
         self.tool = tool
         for btn in self.tool_buttons:
             btn.active = btn.tool == tool
         self.line_start = None
+        
+    def _remove_objects_in_rect(self, rect):
+        """Helper to remove any room objects overlapping the given rect."""
+        i = 0
+        while i < len(self.room.objects):
+            obj = self.room.objects[i]
+            obj_rect = pygame.Rect(obj["x"], obj["y"], obj["w"], obj["h"])
+            if obj_rect.colliderect(rect):
+                self.room.objects.pop(i)
+            else:
+                i += 1
+
+
     
     def update(self, dt):
         """Update editor state."""
@@ -1398,21 +1749,18 @@ class RoomEditor:
         # Draw canvas area
         self.draw_canvas()
         
-        # Draw panel
-        self.draw_panel()
+        # Draw UI
+        self.draw_ui()
         
         # Draw file dialog
         self.file_dialog.draw(self.screen, self.font)
         
-        # Draw entry editor
-        # if self.entry_editor:
-        #     self.entry_editor.draw(self.screen, self.font)
-        
         # Draw message
         if self.message_timer > 0:
             msg_surf = self.font_large.render(self.message, True, COLOR_TEXT)
-            msg_rect = msg_surf.get_rect(centerx=self.screen.get_width() // 2 + self.panel_width // 2, 
+            msg_rect = msg_surf.get_rect(centerx=self.screen.get_width() // 2 + self.sidebar_width // 2, 
                                         bottom=self.screen.get_height() - 20)
+
             pygame.draw.rect(self.screen, COLOR_PANEL, msg_rect.inflate(20, 10))
             self.screen.blit(msg_surf, msg_rect)
         
@@ -1421,10 +1769,14 @@ class RoomEditor:
     def draw_canvas(self):
         """Draw the room canvas."""
         # Canvas background
-        canvas_rect = pygame.Rect(self.panel_width, 0, 
-                                  self.screen.get_width() - self.panel_width,
-                                  self.screen.get_height())
+        canvas_rect = pygame.Rect(self.sidebar_width, self.toolbar_height, 
+                                  self.screen.get_width() - self.sidebar_width,
+                                  self.screen.get_height() - self.toolbar_height)
         pygame.draw.rect(self.screen, (25, 25, 30), canvas_rect)
+        
+        # Clip
+        clip = self.screen.get_clip()
+        self.screen.set_clip(canvas_rect)
         
         # Calculate visible tile range
         tile_size_zoomed = TILE_SIZE * self.zoom
@@ -1443,35 +1795,58 @@ class RoomEditor:
                 rect = pygame.Rect(screen_x, screen_y, 
                                   tile_size_zoomed + 1, tile_size_zoomed + 1)
                 
-                # Clip to canvas
-                if rect.right < self.panel_width or rect.left > self.screen.get_width():
+                if rect.right < self.sidebar_width or rect.left > self.screen.get_width():
+                    continue
+                if rect.bottom < self.toolbar_height or rect.top > self.screen.get_height():
                     continue
                 
+                if self.room.tiles[y][x] == TILE_ICE:
+                    color = TILE_COLORS[TILE_ICE]
+                    pygame.draw.rect(self.screen, color, rect)
+                    continue
+
                 color = TILE_COLORS[tile]
                 pygame.draw.rect(self.screen, color, rect)
                 
-                # Platform indicator
+                # Platform and Objects
+                # Platform and Objects
+                for obj in self.room.objects:
+                    ox = obj["x"] * self.zoom + self.camera_x + self.sidebar_width
+                    oy = obj["y"] * self.zoom + self.camera_y + self.toolbar_height
+                    ow = obj["w"] * self.zoom
+                    oh = obj["h"] * self.zoom
+                    
+                    obj_rect = pygame.Rect(ox, oy, ow, oh)
+                    if obj["type"] == OBJ_PLATFORM:
+                         pygame.draw.rect(self.screen, (150, 120, 70), obj_rect)
+                         pygame.draw.rect(self.screen, (100, 80, 40), obj_rect, 2)
+                
+                # Platform indicator (Tile)
                 if tile == TILE_PLATFORM and self.zoom >= 0.5:
                     top_rect = pygame.Rect(rect.x, rect.y, rect.width, max(2, 4 * self.zoom))
                     pygame.draw.rect(self.screen, (150, 120, 70), top_rect)
         
         # Draw grid
         if self.zoom >= 0.5:
+            # Grid lines (16px - Base Tile Size)
             for x in range(start_x, end_x + 1):
-                screen_x = x * tile_size_zoomed + self.camera_x + self.panel_width
-                color = COLOR_GRID_MAJOR if x % 5 == 0 else COLOR_GRID
+                screen_x = x * tile_size_zoomed + self.camera_x + self.sidebar_width
+                # Major grid every 2 tiles (32px blocks)
+                color = COLOR_GRID_MAJOR if x % 2 == 0 else COLOR_GRID
                 pygame.draw.line(self.screen, color,
-                               (screen_x, max(0, self.camera_y)),
+                               (screen_x, max(self.toolbar_height, self.camera_y + self.toolbar_height)),
                                (screen_x, min(self.screen.get_height(), 
-                                            self.room.height * tile_size_zoomed + self.camera_y)))
+                                            self.room.height * tile_size_zoomed + self.camera_y + self.toolbar_height)))
             
             for y in range(start_y, end_y + 1):
-                screen_y = y * tile_size_zoomed + self.camera_y
-                color = COLOR_GRID_MAJOR if y % 5 == 0 else COLOR_GRID
+                screen_y = y * tile_size_zoomed + self.camera_y + self.toolbar_height
+                # Major grid every 2 tiles (32px blocks)
+                color = COLOR_GRID_MAJOR if y % 2 == 0 else COLOR_GRID
                 pygame.draw.line(self.screen, color,
-                               (max(self.panel_width, self.camera_x + self.panel_width), screen_y),
+                               (max(self.sidebar_width, self.camera_x + self.sidebar_width), screen_y),
                                (min(self.screen.get_width(),
-                                   self.room.width * tile_size_zoomed + self.camera_x + self.panel_width), screen_y))
+                                   self.room.width * tile_size_zoomed + self.camera_x + self.sidebar_width), screen_y))
+
         
         # Draw spawn point
         if self.room.spawn:
@@ -1494,7 +1869,7 @@ class RoomEditor:
         # Draw line/rect preview
         if self.line_start:
             mouse_pos = pygame.mouse.get_pos()
-            if mouse_pos[0] > self.panel_width:
+            if mouse_pos[0] > self.sidebar_width and mouse_pos[1] > self.toolbar_height:
                 end_tile = self.screen_to_tile(*mouse_pos)
                 start_screen = self.tile_to_screen(*self.line_start)
                 end_screen = self.tile_to_screen(*end_tile)
@@ -1515,8 +1890,8 @@ class RoomEditor:
         
         # Room bounds outline
         bounds = pygame.Rect(
-            self.camera_x + self.panel_width,
-            self.camera_y,
+            self.camera_x + self.sidebar_width,
+            self.camera_y + self.toolbar_height,
             self.room.width * tile_size_zoomed,
             self.room.height * tile_size_zoomed
         )
@@ -1524,78 +1899,120 @@ class RoomEditor:
         
         # Cursor tile highlight
         mouse_pos = pygame.mouse.get_pos()
-        if mouse_pos[0] > self.panel_width:
-            tile_x, tile_y = self.screen_to_tile(*mouse_pos)
-            if 0 <= tile_x < self.room.width and 0 <= tile_y < self.room.height:
-                screen_x, screen_y = self.tile_to_screen(tile_x, tile_y)
-                cursor_rect = pygame.Rect(screen_x, screen_y, tile_size_zoomed, tile_size_zoomed)
+        if mouse_pos[0] > self.sidebar_width and mouse_pos[1] > self.toolbar_height:
+            if self.tool == "platform":
+                # Platform cursor (32x16, snaps to 16px grid)
+                world_x = (mouse_pos[0] - self.sidebar_width - self.camera_x) / self.zoom
+                world_y = (mouse_pos[1] - self.toolbar_height - self.camera_y) / self.zoom
+                
+                # X: 32px snapping
+                grid_x = int(world_x // 32) * 32
+                grid_y = int(world_y // 16) * 16
+                
+                # Platform cursor (32x16)
+                screen_x = grid_x * self.zoom + self.camera_x + self.sidebar_width
+                screen_y = grid_y * self.zoom + self.camera_y + self.toolbar_height
+                
+                cursor_rect = pygame.Rect(screen_x, screen_y, 32 * self.zoom, 16 * self.zoom)
                 pygame.draw.rect(self.screen, (255, 255, 255), cursor_rect, 2)
+            
+            else:
+                # Normal tile cursor
+                tile_x, tile_y = self.screen_to_tile(*mouse_pos)
+                
+                # Check for Big Block types (Solid, Ice)
+                if self.current_tile in (TILE_SOLID, TILE_ICE):
+                    # Snap to even grid (32px blocks)
+                    snap_x = (tile_x // 2) * 2
+                    snap_y = (tile_y // 2) * 2
+                    screen_x, screen_y = self.tile_to_screen(snap_x, snap_y)
+                    # Cursor is 2x2 tiles (32x32 pixels)
+                    cursor_rect = pygame.Rect(screen_x, screen_y, tile_size_zoomed * 2, tile_size_zoomed * 2)
+                    pygame.draw.rect(self.screen, (255, 255, 255), cursor_rect, 2)
+                else:
+                    # Single tile cursor (16x16)
+                    if 0 <= tile_x < self.room.width and 0 <= tile_y < self.room.height:
+                        screen_x, screen_y = self.tile_to_screen(tile_x, tile_y)
+                        cursor_rect = pygame.Rect(screen_x, screen_y, tile_size_zoomed, tile_size_zoomed)
+                        pygame.draw.rect(self.screen, (255, 255, 255), cursor_rect, 2)
+                
+        # Remove clip
+        self.screen.set_clip(clip)
     
-    def draw_panel(self):
-        """Draw the side panel."""
-        panel_rect = pygame.Rect(0, 0, self.panel_width, self.screen.get_height())
-        pygame.draw.rect(self.screen, COLOR_PANEL, panel_rect)
+    def draw_ui(self):
+        """Draw the toolbar and sidebar."""
+        # --- Toolbar (Top) ---
+        toolbar_rect = pygame.Rect(0, 0, self.screen.get_width(), self.toolbar_height)
+        pygame.draw.rect(self.screen, COLOR_PANEL, toolbar_rect)
         pygame.draw.line(self.screen, COLOR_GRID_MAJOR, 
-                        (self.panel_width, 0), (self.panel_width, self.screen.get_height()))
-        
-        # Title
-        title = "Room Editor"
-        title_surf = self.font_large.render(title, True, COLOR_TEXT)
-        self.screen.blit(title_surf, (15, 15))
-        
-        # Tile section label
-        section_surf = self.font.render("TILES (0-5)", True, COLOR_TEXT_DIM)
-        self.screen.blit(section_surf, (15, 35))
-        
-        for btn in self.tile_buttons:
-            btn.draw(self.screen, self.font)
-        
-        # Tool section label
-        section_surf = self.font.render("TOOLS", True, COLOR_TEXT_DIM)
-        self.screen.blit(section_surf, (15, 155))
+                        (0, self.toolbar_height), (self.screen.get_width(), self.toolbar_height))
         
         for btn in self.tool_buttons:
             btn.draw(self.screen, self.font)
-        
-        # Size section label
-        section_surf = self.font.render("ROOM SIZE", True, COLOR_TEXT_DIM)
-        self.screen.blit(section_surf, (15, 300))
+        for btn in self.action_buttons:
+            btn.draw(self.screen, self.font)
         
         self.width_input.draw(self.screen, self.font)
         self.height_input.draw(self.screen, self.font)
         self.resize_btn.draw(self.screen, self.font)
+        self.exit_btn.draw(self.screen, self.font)
+
+        # --- Sidebar (Left) ---
+        sidebar_rect = pygame.Rect(0, self.toolbar_height, self.sidebar_width, self.screen.get_height() - self.toolbar_height)
+        pygame.draw.rect(self.screen, (30, 30, 40), sidebar_rect)
+        pygame.draw.line(self.screen, COLOR_GRID_MAJOR, 
+                        (self.sidebar_width, self.toolbar_height), (self.sidebar_width, self.screen.get_height()))
         
-        # File section label
-        section_surf = self.font.render("FILE", True, COLOR_TEXT_DIM)
-        self.screen.blit(section_surf, (15, 355))
+        # Sidebar Header
+        header_h = 30
+        pygame.draw.rect(self.screen, COLOR_PANEL, (0, self.toolbar_height, self.sidebar_width, header_h))
+        section_surf = self.font.render("ASSETS", True, COLOR_TEXT_DIM)
+        self.screen.blit(section_surf, (15, self.toolbar_height + 8))
         
-        for btn in self.action_buttons:
+        # Clip sidebar content
+        content_rect = pygame.Rect(0, self.toolbar_height + header_h, self.sidebar_width, self.screen.get_height() - self.toolbar_height - header_h)
+        clip = self.screen.get_clip()
+        self.screen.set_clip(content_rect)
+        
+        # Draw tiles with scrolling
+        start_y = self.toolbar_height + header_h - self.sidebar_scroll
+        
+        # Shift buttons for drawing
+        for btn in self.tile_buttons:
+            original_y = btn.rect.y
+            btn.rect.y += start_y
             btn.draw(self.screen, self.font)
+            btn.rect.y = original_y # Restore
         
-        # Info at bottom
-        info_y = self.screen.get_height() - 120
+        self.screen.set_clip(clip)
+        
+        # Info at bottom of sidebar (Fixed)
+        info_h = 100
+        info_y = self.screen.get_height() - info_h
+        pygame.draw.rect(self.screen, COLOR_PANEL, (0, info_y, self.sidebar_width, info_h))
+        pygame.draw.line(self.screen, COLOR_GRID_MAJOR, (0, info_y), (self.sidebar_width, info_y))
         
         # Filename
         filename = os.path.basename(self.room.filename) if self.room.filename else "Untitled"
         if self.room.modified:
             filename += "*"
         file_surf = self.font.render(filename, True, COLOR_TEXT)
-        self.screen.blit(file_surf, (15, info_y))
+        self.screen.blit(file_surf, (15, info_y + 10))
         
         # Zoom
         zoom_surf = self.font.render(f"Zoom: {self.zoom:.1f}x", True, COLOR_TEXT_DIM)
-        self.screen.blit(zoom_surf, (15, info_y + 18))
+        self.screen.blit(zoom_surf, (15, info_y + 28))
         
         # Current tile/tool
         tool_surf = self.font.render(f"Tool: {self.tool.capitalize()}", True, COLOR_TEXT_DIM)
-        self.screen.blit(tool_surf, (15, info_y + 36))
+        self.screen.blit(tool_surf, (15, info_y + 46))
         
         # Mouse pos if on canvas
         mouse_pos = pygame.mouse.get_pos()
-        if mouse_pos[0] > self.panel_width:
+        if mouse_pos[0] > self.sidebar_width and mouse_pos[1] > self.toolbar_height:
             tile_x, tile_y = self.screen_to_tile(*mouse_pos)
             pos_surf = self.font.render(f"Tile: {tile_x}, {tile_y}", True, COLOR_TEXT_DIM)
-            self.screen.blit(pos_surf, (15, info_y + 54))
+            self.screen.blit(pos_surf, (15, info_y + 64))
     
     def run(self):
         """Main loop."""

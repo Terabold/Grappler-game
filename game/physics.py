@@ -186,16 +186,41 @@ class GrappleHook:
             self.fire_distance += step
             
             # Check for hit at this step
-            hook_rect = pygame.Rect(int(current_x) - 3, int(current_y) - 3, 6, 6)
-            collisions = room_manager.get_collisions(hook_rect)
+            hook_rect = pygame.Rect(int(current_x) - 2, int(current_y) - 2, 4, 4)
             
             valid_hit = False
+            
+            # 1. Check TILES
+            collisions = room_manager.get_collisions(hook_rect)
             for tile in collisions:
                 # tile_type: 1=solid, 3=grapple, 5=platform
-                if tile.tile_type in (1, 3, 5):
+                if tile.tile_type in (TILE_SOLID, TILE_GRAPPLE, TILE_PLATFORM):
                     valid_hit = True
                     break
             
+            # 2. Check OBJECTS (Pixel Perfect)
+            if not valid_hit:
+                obj_collisions = room_manager.get_object_collisions(hook_rect)
+                for obj in obj_collisions:
+                    # Calculate local position on the object
+                    local_x = int(current_x - obj.rect.x)
+                    local_y = int(current_y - obj.rect.y)
+                    
+                    if obj.mask:
+                        # Check mask if within bounds
+                        if (0 <= local_x < obj.width and 
+                            0 <= local_y < obj.height):
+                            try:
+                                if obj.mask.get_at((local_x, local_y)):
+                                    valid_hit = True
+                                    break
+                            except IndexError:
+                                pass
+                    else:
+                        # Fallback to rect collision if no mask
+                        valid_hit = True
+                        break
+
             if valid_hit:
                 # We hit something!
                 self.state = "attached"

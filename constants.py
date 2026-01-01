@@ -54,7 +54,7 @@ COLOR_LIGHT_GRAY = (150, 150, 150)
 COLOR_ACCENT = (220, 60, 60)
 
 # Tile settings
-TILE_SIZE = 32
+TILE_SIZE = 16
 
 
 # Player settings
