@@ -387,15 +387,32 @@ class RoomManager:
         def on_complete():
             self.current_room = new_room
             
+            # Dampen vertical momentum for smoother entry (except Upward)
+            if direction != "up":
+                player.vy *= 0.2
+                if abs(player.vy) < 100: player.vy = 0 # Snap small values
+            
             # Hybrid Transition Logic
-            # Forward (Level Up): Teleport to Spawn
+            # Forward (Level Up): Auto-Move to Spawn (Celeste-like)
             # Backward (Previous): Natural Movement
             
             if is_forward and new_room.spawn:
                  spawn_pos = new_room.get_spawn_world()
-                 print(f"DEBUG: Forward transition to {new_room.room_id} -> Teleporting to spawn {spawn_pos}")
-                 player.x = spawn_pos[0]
-                 player.y = spawn_pos[1]
+                 print(f"DEBUG: Forward transition to {new_room.room_id} -> Auto-Moving to spawn {spawn_pos}")
+                 # Place player at natural entry point first
+                 if direction == "right": player.x = new_room.bounds.left + 4
+                 elif direction == "left": player.x = new_room.bounds.right - player.width - 4
+                 elif direction == "down": player.y = new_room.bounds.top + 4
+                 elif direction == "up": player.y = new_room.bounds.bottom - player.height - 4
+                 
+                 # Initiate Auto-Move to Spawn
+                 if direction == "up":
+                     # Bezier Arc for smooth precise landing (Visual "Nice Animation")
+                     print(f"DEBUG: Up transition -> Arc to {spawn_pos}")
+                     player.move_to_arc(spawn_pos, duration=0.45, lift=80) 
+                 else:
+                     # Horizontal/Down: Physics-based "Natural" move
+                     player.move_to(spawn_pos[0])
             else:
                  # Natural transition - place player just inside new room
                  if direction == "right":

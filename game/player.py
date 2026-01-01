@@ -10,6 +10,13 @@ from .physics import (
 from .room import TILE_SOLID, TILE_PLATFORM, TILE_SPIKE, TILE_EXIT, TILE_GRAPPLE
 
 
+class MockInput:
+    def __init__(self, active):
+        self.active = active
+    def __getitem__(self, key):
+        return key in self.active
+
+
 class Player:
     """
     Player controller with:
@@ -58,6 +65,19 @@ class Player:
         
         # Roll/dash state
         self.rolling = False
+
+        # Transition Auto-Movement
+        self.move_mode = 'normal' # 'normal', 'auto_physics', 'auto_arc'
+        self.auto_target_x = None
+        self.auto_target_y = None
+        self.auto_move_callback = None
+        
+        # Arc variables
+        self.arc_start = (0,0)
+        self.arc_target = (0,0)
+        self.arc_control = (0,0)
+        self.arc_timer = 0.0
+        self.arc_duration = 0.0
         self.roll_timer = 0.0
         self.roll_cooldown = 0.0
         self.roll_dir = 1  # 1 = right, -1 = left
@@ -100,6 +120,12 @@ class Player:
         self.transition_slid = 0.0
         self.grapple.cancel()
         
+        # Reset auto-move
+        self.move_mode = 'normal'
+        self.auto_target_x = None
+        self.auto_target_y = None
+        self.auto_move_callback = None
+        
         # Only zero velocity if teleporting (forward progression)
         # Keep velocity for natural backward movement
         if not keep_momentum:
@@ -110,27 +136,131 @@ class Player:
         
         dirs = {"right": (1, 0), "left": (-1, 0), "down": (0, 1), "up": (0, -1)}
         self.transition_dir = dirs.get(direction, (0, 0))
-    
+
+    def move_to(self, target_x, target_y=None, launch_vy=None, callback=None):
+        """
+        Initiate physics-based auto-movement (walk/fall/launch).
+        """
+        self.move_mode = 'auto_physics'
+        self.frozen = False # Enable physics!
+        self.auto_target_x = target_x
+        self.auto_target_y = target_y
+        self.auto_move_callback = callback
+        
+        if launch_vy is not None:
+            self.vy = launch_vy
+
+    def move_to_arc(self, target_pos, duration=0.4, lift=64, callback=None):
+        """
+        Initiate animated Bezier arc movement (ignores physics).
+        Ideal for upward transitions to land precisely.
+        """
+        self.move_mode = 'auto_arc'
+        self.frozen = True # Physics OFF
+        self.arc_start = (self.x, self.y)
+        self.arc_target = target_pos
+        self.arc_duration = duration
+        self.arc_timer = 0.0
+        self.auto_move_callback = callback
+        
+        # Quadratic Bezier Control Point
+        # Peak calculated as min(start, end) - lift
+        peak_y = min(self.y, target_pos[1]) - lift
+        mid_x = (self.x + target_pos[0]) / 2
+        self.arc_control = (mid_x, peak_y)
+
     def end_transition(self):
-        self.frozen = False
+        # Only clear frozen if we are NOT in an auto-mode
+        if self.move_mode == 'normal':
+            self.frozen = False
         self.transition_dir = (0, 0)
     
     # =========================================================================
     # UPDATE
     # =========================================================================
     
+
     def update(self, dt, room_manager, controls, camera=None):
-        if self.frozen:
-            if self.transition_slid < self.transition_slide:
-                move = 150 * dt
-                self.x += self.transition_dir[0] * move
-                self.y += self.transition_dir[1] * move
-                self.transition_slid += move
-            return
+        keys = None
         
-        dt = min(dt, 0.033)
-        
-        keys = pygame.key.get_pressed()
+        # --- ARC MOVEMENT (Animation) ---
+        if self.move_mode == 'auto_arc':
+            self.arc_timer += dt
+            if self.arc_duration > 0:
+                t = self.arc_timer / self.arc_duration
+            else:
+                t = 1.0
+                
+            if t >= 1.0:
+                t = 1.0
+                # Done
+                self.x, self.y = self.arc_target
+                self.vx, self.vy = 0, 0
+                self.move_mode = 'normal'
+                self.frozen = False
+                if self.auto_move_callback: self.auto_move_callback()
+                keys = pygame.key.get_pressed()
+            else:
+                # Interpolate Quadratic Bezier
+                p0 = self.arc_start
+                p1 = self.arc_control
+                p2 = self.arc_target
+                u = 1 - t
+                tt = t*t
+                uu = u*u
+                self.x = uu * p0[0] + 2 * u * t * p1[0] + tt * p2[0]
+                self.y = uu * p0[1] + 2 * u * t * p1[1] + tt * p2[1]
+                return # Skip physics
+
+        # --- PHYSICS AUTO-MOVE ---
+        elif self.move_mode == 'auto_physics':
+            dt = min(dt, 0.033)
+            active = set()
+            
+            # Handle Horizontal
+            if self.auto_target_x is not None:
+                delta = self.auto_target_x - self.x
+                if delta > 8: active.add(controls['right'])
+                elif delta < -8: active.add(controls['left'])
+                else:
+                    self.auto_target_x = None
+                    self.vx = 0
+            
+            # Handle Vertical (Stop-on-reach)
+            if self.auto_target_y is not None:
+                if self.auto_target_y < self.y: # Target above
+                    if self.vy >= 0: self.auto_target_y = None # Missed
+                    elif self.y <= self.auto_target_y: # Arrived
+                        self.y = self.auto_target_y
+                        self.vy = 0
+                        self.auto_target_y = None
+                else: # Target below
+                    if self.vy <= 0: self.auto_target_y = None # Missed
+                    elif self.y >= self.auto_target_y: # Arrived
+                        self.y = self.auto_target_y
+                        self.vy = 0
+                        self.auto_target_y = None
+            
+            # Check Arrival
+            if self.auto_target_x is None and self.auto_target_y is None:
+                self.move_mode = 'normal'
+                self.vx = 0
+                if self.auto_move_callback: self.auto_move_callback()
+                keys = pygame.key.get_pressed()
+            else:
+                keys = MockInput(active)
+
+        if keys is None:
+            if self.frozen:
+                if self.transition_slid < self.transition_slide:
+                    move = 150 * dt
+                    self.x += self.transition_dir[0] * move
+                    self.y += self.transition_dir[1] * move
+                    self.transition_slid += move
+                return
+            
+            dt = min(dt, 0.033)
+            keys = pygame.key.get_pressed()
         mouse = pygame.mouse.get_pressed()
         mouse_pos = pygame.mouse.get_pos()
         
